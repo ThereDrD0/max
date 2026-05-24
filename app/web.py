@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from secrets import compare_digest
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,6 +23,7 @@ def create_app(
     *,
     storage: Storage | None = None,
     bot_client: BotClient | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     resolved_storage = storage or create_storage(resolved_settings)
@@ -28,7 +31,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        EventCleanupService(resolved_storage).cleanup()
+        EventCleanupService(resolved_storage, now=now).cleanup()
         sync_roles_from_settings(resolved_storage, resolved_settings)
         yield
 
@@ -56,6 +59,7 @@ def create_app(
             bot_client=resolved_bot_client,
             settings=resolved_settings,
             update=update,
+            now=now,
         )
         return JSONResponse({"ok": True})
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import count
@@ -13,6 +14,7 @@ from app.domain import (
     NoSeatsAvailableError,
 )
 from app.enums import LateCancelPolicy, NotificationKind, OutboxStatus, RegistrationStatus
+import app.services.registration as registration_module
 from app.services.registration import RegistrationService
 from app.storage.entities import NotificationOutbox
 from tests.conftest import create_event
@@ -30,6 +32,30 @@ def test_profile_consent_is_recorded_with_document_version(storage, fixed_now):
     assert consent.document_version == "hackathon-2026-05"
     assert consent.profile_data_allowed is True
     assert service.has_profile_consent(101) is True
+
+
+def test_default_code_generator_uses_numeric_v2_format():
+    codes = [registration_module.default_code_generator() for _ in range(20)]
+
+    assert all(re.fullmatch(r"\d{3}-\d{3}", code) for code in codes)
+
+
+def test_registration_code_input_is_normalized_to_v2_format():
+    normalize = getattr(registration_module, "normalize_registration_code_input")
+
+    assert normalize("123-456") == "123-456"
+    assert normalize("123456") == "123-456"
+    assert normalize(" 123 456 ") == "123-456"
+    assert normalize("ABC123") is None
+    assert normalize("12A456") is None
+
+
+def test_max_profile_user_id_is_extracted_from_mention_link():
+    extract = getattr(registration_module, "extract_max_user_id")
+
+    assert extract("[Анна](max://user/101)") == 101
+    assert extract("max://user/202") == 202
+    assert extract("https://max.ru/u/opaque") is None
 
 
 def test_registration_creates_code_schedules_reminders_and_blocks_duplicates(
@@ -357,6 +383,32 @@ def test_notification_toggle_is_stored_on_registration(storage, fixed_now):
     stored = storage.get_registration(registration.id)
     assert stored is not None
     assert stored.notifications_enabled is False
+
+
+def test_storage_rewrite_registration_codes_rebuilds_lookup(storage, fixed_now):
+    event = create_event(storage, fixed_now, capacity=3)
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=iter(["OLD111", "OLD222"]).__next__,
+    )
+    for user_id, name in [(101, "Анна"), (102, "Борис")]:
+        service.upsert_user(user_id, name)
+        service.record_profile_consent(user_id, "hackathon-2026-05")
+    first = service.create_registration(101, event.id, None)
+    second = service.create_registration(102, event.id, None)
+
+    changed = storage.rewrite_registration_codes(
+        iter(["123-456", "234-567"]).__next__,
+    )
+
+    assert changed == 2
+    assert storage.find_registration_by_code_global("OLD111") is None
+    assert storage.find_registration_by_code_global("OLD222") is None
+    assert storage.get_registration(first.id).code == "123-456"
+    assert storage.get_registration(second.id).code == "234-567"
+    assert storage.find_registration_by_code_global("123456").id == first.id
+    assert storage.find_registration_by_code_global("234-567").id == second.id
 
 
 def _capture_error(func, *args):

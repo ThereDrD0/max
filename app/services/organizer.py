@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.domain import (
+    AttendanceMarkDeniedError,
     EventStartInPastError,
     InvalidNotificationKindError,
+    RegistrationNotFoundError,
     SlotNotFoundError,
 )
 from app.enums import (
@@ -16,6 +18,7 @@ from app.enums import (
     RegistrationStatus,
 )
 from app.services.reminders import render_automatic_reminder, render_manual_reminder
+from app.services.registration_codes import normalize_registration_code_input
 from app.storage.base import Storage
 from app.storage.entities import Event, EventSlot, NotificationOutbox, Registration
 
@@ -55,14 +58,20 @@ class OrganizerService:
         event_id: int,
         code: str,
     ) -> Registration:
-        return self.storage.find_registration_by_code(actor_user_id, event_id, code)
+        normalized = normalize_registration_code_input(code)
+        if normalized is None:
+            raise RegistrationNotFoundError("Запись не найдена")
+        return self.storage.find_registration_by_code(actor_user_id, event_id, normalized)
 
     def find_registration_by_code_any_event(
         self,
         actor_user_id: int,
         code: str,
     ) -> Registration:
-        return self.storage.find_registration_by_code_any_event(actor_user_id, code)
+        normalized = normalize_registration_code_input(code)
+        if normalized is None:
+            raise RegistrationNotFoundError("Запись не найдена")
+        return self.storage.find_registration_by_code_any_event(actor_user_id, normalized)
 
     def close_registration(self, actor_user_id: int, event_id: int) -> Event:
         return self.storage.close_registration(actor_user_id, event_id)
@@ -215,8 +224,12 @@ class OrganizerService:
         actor_user_id: int,
         registration_id: int,
     ) -> Registration:
-        previous = self.storage.get_registration(registration_id)
-        previous_status = previous.status if previous is not None else None
+        previous = self._registration_for_actor(actor_user_id, registration_id)
+        if previous.status == RegistrationStatus.ATTENDED:
+            return previous
+        if previous.status != RegistrationStatus.CONFIRMED:
+            raise AttendanceMarkDeniedError("Отмененную запись нельзя отметить как пришедшую")
+        previous_status = previous.status
         current = self.now()
         registration = self.storage.mark_attended(
             actor_user_id,
@@ -243,6 +256,37 @@ class OrganizerService:
                 )
             )
         return registration
+
+    def mark_attended_by_event_code(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        code: str,
+    ) -> Registration:
+        registration = self.find_registration_by_code(actor_user_id, event_id, code)
+        return self.mark_attended_with_notification(actor_user_id, registration.id)
+
+    def mark_attended_by_event_user(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        participant_user_id: int,
+    ) -> Registration:
+        registrations = [
+            registration
+            for registration in self.storage.get_event_registrations(actor_user_id, event_id)
+            if registration.user_id == participant_user_id
+        ]
+        if not registrations:
+            raise RegistrationNotFoundError("Запись не найдена")
+        registrations.sort(
+            key=lambda item: (
+                self._attendance_lookup_status_order(item.status),
+                item.created_at,
+            ),
+            reverse=True,
+        )
+        return self.mark_attended_with_notification(actor_user_id, registrations[0].id)
 
     def mark_confirmed(self, actor_user_id: int, registration_id: int) -> Registration:
         return self.storage.change_status(
@@ -355,6 +399,30 @@ class OrganizerService:
             f"Организатор отметил, что вы пришли на мероприятие «{title}».\n\n"
             "Спасибо, что отметились. Хорошего участия!"
         )
+
+    def _registration_for_actor(
+        self,
+        actor_user_id: int,
+        registration_id: int,
+    ) -> Registration:
+        registration = self.storage.get_registration(registration_id)
+        if registration is None:
+            raise RegistrationNotFoundError("Запись не найдена")
+        for item in self.storage.get_event_registrations(
+            actor_user_id,
+            registration.event_id,
+        ):
+            if item.id == registration_id:
+                return item
+        raise RegistrationNotFoundError("Запись не найдена")
+
+    @staticmethod
+    def _attendance_lookup_status_order(status: RegistrationStatus) -> int:
+        if status == RegistrationStatus.CONFIRMED:
+            return 2
+        if status == RegistrationStatus.ATTENDED:
+            return 1
+        return 0
 
     def _ensure_future_start(self, starts_at: datetime) -> None:
         if starts_at <= self.now():

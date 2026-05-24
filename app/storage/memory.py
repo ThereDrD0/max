@@ -30,6 +30,7 @@ from app.services.reminders import (
     LEGACY_AUTOMATIC_REMINDER_KINDS,
     automatic_reminder_schedule,
 )
+from app.services.registration_codes import normalize_registration_code_input
 from app.storage.base import CodeGenerator, ReminderRenderer
 from app.storage.entities import (
     AuditLog,
@@ -574,7 +575,9 @@ class MemoryStorage:
         code: str,
     ) -> Registration:
         self._require_event_access(actor_user_id, event_id)
-        normalized = code.strip().upper()
+        normalized = normalize_registration_code_input(code)
+        if normalized is None:
+            raise RegistrationNotFoundError("Запись не найдена")
         for registration in self.registrations.values():
             if registration.event_id == event_id and registration.code == normalized:
                 return self._attach_registration(registration)
@@ -588,17 +591,40 @@ class MemoryStorage:
         event_ids = {event.id for event in self.list_organizer_events(actor_user_id)}
         if not event_ids:
             raise AccessDeniedError("Нет доступных мероприятий")
-        normalized = code.strip().upper()
+        normalized = normalize_registration_code_input(code)
+        if normalized is None:
+            raise RegistrationNotFoundError("Запись не найдена")
         for registration in self.registrations.values():
             if registration.event_id in event_ids and registration.code == normalized:
                 return self._attach_registration(registration)
         raise RegistrationNotFoundError("Запись не найдена")
 
     def find_registration_by_code_global(self, code: str) -> Registration | None:
-        registration_id = self.registration_codes.get(code.strip().upper())
+        normalized = normalize_registration_code_input(code)
+        if normalized is None:
+            return None
+        registration_id = self.registration_codes.get(normalized)
         if registration_id is None:
             return None
         return self.get_registration(registration_id)
+
+    def rewrite_registration_codes(self, code_generator: CodeGenerator) -> int:
+        with self._lock:
+            used_codes: set[str] = set()
+            next_codes: dict[int, str] = {}
+            for registration in sorted(self.registrations.values(), key=lambda item: item.id):
+                code = self._next_unique_rewrite_code(code_generator, used_codes)
+                used_codes.add(code)
+                next_codes[registration.id] = code
+
+            current = utc_now()
+            self.registration_codes.clear()
+            for registration in sorted(self.registrations.values(), key=lambda item: item.id):
+                code = next_codes[registration.id]
+                registration.code = code
+                registration.updated_at = current
+                self.registration_codes[code] = registration.id
+            return len(next_codes)
 
     def close_registration(self, actor_user_id: int, event_id: int) -> Event:
         with self._lock:
@@ -808,6 +834,17 @@ class MemoryStorage:
         for _ in range(20):
             code = code_generator().strip().upper()
             if code not in self.registration_codes:
+                return code
+        raise RuntimeError("Не удалось сгенерировать уникальный код записи")
+
+    @staticmethod
+    def _next_unique_rewrite_code(
+        code_generator: CodeGenerator,
+        used_codes: set[str],
+    ) -> str:
+        for _ in range(20):
+            code = code_generator().strip().upper()
+            if code and code not in used_codes:
                 return code
         raise RuntimeError("Не удалось сгенерировать уникальный код записи")
 

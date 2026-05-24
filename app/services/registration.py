@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-import secrets
-import string
 from collections.abc import Callable
 from datetime import datetime, timezone
 
 from app.enums import NotificationKind
+from app.services.registration_codes import (
+    default_code_generator,
+    extract_max_user_id,
+    normalize_registration_code_input,
+)
 from app.services.reminders import render_automatic_reminder
 from app.storage.base import Storage
 from app.storage.entities import Consent, Event, Registration, User
 
 
 CodeGenerator = Callable[[], str]
-
-
-def default_code_generator() -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(6))
 
 
 class RegistrationService:

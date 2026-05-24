@@ -90,7 +90,7 @@ def test_migration_exports_legacy_sql_database_and_imports_to_storage(tmp_path, 
             text(
                 """
                 INSERT INTO registrations VALUES
-                (1, 'ABC123', 101, 1, NULL, 'confirmed', 1, :now, :now, NULL, NULL)
+                (1, '123-456', 101, 1, NULL, 'confirmed', 1, :now, :now, NULL, NULL)
                 """
             ),
             {"now": now},
@@ -102,4 +102,4 @@ def test_migration_exports_legacy_sql_database_and_imports_to_storage(tmp_path, 
 
     assert report.ok is True
     assert storage.get_user(101).display_name == "Анна"
-    assert storage.find_registration_by_code_global("ABC123").event.title == "День открытых дверей"
+    assert storage.find_registration_by_code_global("123456").event.title == "День открытых дверей"

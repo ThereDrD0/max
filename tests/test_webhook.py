@@ -55,6 +55,7 @@ def test_webhook_deletes_message_created_source_message(storage, fake_bot, fixed
         Settings(webhook_secret="right-secret", max_bot_token="test-token"),
         storage=storage,
         bot_client=fake_bot,
+        now=lambda: fixed_now,
     )
     client = TestClient(app)
 
@@ -89,6 +90,7 @@ def test_webhook_accepts_bot_started_deeplink_payload(storage, fake_bot, fixed_n
         ),
         storage=storage,
         bot_client=fake_bot,
+        now=lambda: fixed_now,
     )
     client = TestClient(app)
 

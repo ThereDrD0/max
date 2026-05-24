@@ -52,6 +52,7 @@ def test_function_handler_processes_deeplink_payload(storage, fake_bot, fixed_no
         ),
         storage=storage,
         bot_client=fake_bot,
+        now=lambda: fixed_now,
     )
 
     response = handler(

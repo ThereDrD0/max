@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.domain import AccessDeniedError, InvalidNotificationKindError
+from app.domain import AccessDeniedError, AttendanceMarkDeniedError, InvalidNotificationKindError
 from app.enums import NotificationKind, RegistrationStatus
 from app.services.organizer import OrganizerService
 from app.services.registration import RegistrationService
@@ -16,7 +16,7 @@ def seed_event_with_registration(storage, fixed_now):
     registration_service = RegistrationService(
         storage,
         now=lambda: fixed_now,
-        code_generator=lambda: "FINDME",
+        code_generator=lambda: "123-456",
     )
     registration_service.upsert_user(101, "Анна")
     registration_service.record_profile_consent(101, "hackathon-2026-05")
@@ -39,7 +39,7 @@ def test_organizer_searches_registration_by_code_and_updates_status(
     event, registration = seed_event_with_registration(storage, fixed_now)
     service = OrganizerService(storage, now=lambda: fixed_now)
 
-    found = service.find_registration_by_code(501, event.id, "FINDME")
+    found = service.find_registration_by_code(501, event.id, "123456")
     service.mark_attended(501, found.id)
 
     assert found.id == registration.id
@@ -88,6 +88,45 @@ def test_organizer_mark_attended_skips_notification_when_disabled(
         for item in storage.list_notifications()
         if item.kind == NotificationKind.ATTENDANCE_MARKED
     ] == []
+
+
+def test_organizer_marks_attended_by_event_code_and_user(
+    storage,
+    fixed_now,
+):
+    event, registration = seed_event_with_registration(storage, fixed_now)
+    service = OrganizerService(storage, now=lambda: fixed_now)
+
+    by_code = service.mark_attended_by_event_code(501, event.id, "123456")
+    by_user = service.mark_attended_by_event_user(501, event.id, registration.user_id)
+
+    assert by_code.id == registration.id
+    assert by_user.id == registration.id
+    assert storage.get_registration(registration.id).status == RegistrationStatus.ATTENDED
+    assert len(
+        [
+            item
+            for item in storage.list_notifications()
+            if item.kind == NotificationKind.ATTENDANCE_MARKED
+        ]
+    ) == 1
+
+
+def test_organizer_does_not_mark_canceled_registration_attended(
+    storage,
+    fixed_now,
+):
+    event, registration = seed_event_with_registration(storage, fixed_now)
+    RegistrationService(storage, now=lambda: fixed_now).cancel_registration(
+        registration.user_id,
+        registration.id,
+    )
+    service = OrganizerService(storage, now=lambda: fixed_now)
+
+    with pytest.raises(AttendanceMarkDeniedError):
+        service.mark_attended_by_event_code(501, event.id, "123456")
+
+    assert storage.get_registration(registration.id).status == RegistrationStatus.CANCELED_BY_USER
 
 
 def test_organizer_can_close_registration(storage, fixed_now):

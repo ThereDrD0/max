@@ -73,7 +73,13 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
         == ["🔔 Напомнить участникам", "🔗 Поделиться"]
         for row in rows
     )
+    assert any(
+        [button["text"] for button in row]
+        == ["👥 Участники", "🔎 Отметить по коду"]
+        for row in rows
+    )
     assert "👥 Участники" in button_texts
+    assert "🔎 Отметить по коду" in button_texts
     assert "🚫 Закрыть регистрацию" in button_texts
     assert "🛑 Закрыть мероприятие" in button_texts
     assert "🔗 Поделиться" in button_texts
@@ -98,7 +104,9 @@ async def test_organizer_event_menu_hides_participants_button_without_registrati
         payload=Payload("org_event", event_id=event.id).pack(),
     )
 
-    assert "👥 Участники" not in _button_texts(fake_bot.sent[-1])
+    button_texts = _button_texts(fake_bot.sent[-1])
+    assert "👥 Участники" not in button_texts
+    assert "🔎 Отметить по коду" not in button_texts
 
 
 async def test_organizer_close_registration_requires_confirmation_and_hides_action(
@@ -623,6 +631,167 @@ async def test_organizer_participants_button_marks_attended_and_refreshes_page(
     assert "1. [Анна](max://user/101) - ATND01 - Записан" in reverted["text"]
     assert "✅ Анна пришел" in _button_texts(reverted)
     assert "↩️ Анна записан" not in _button_texts(reverted)
+
+
+async def test_organizer_attendance_lookup_marks_by_code_and_keeps_state(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Пробное занятие")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "123-456",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_attendance_lookup", event_id=event.id).pack(),
+    )
+
+    prompt = fake_bot.sent[-1]
+    state = storage.get_organizer_state(501)
+    assert state is not None
+    assert state.mode == "attendance_lookup"
+    assert state.event_id == event.id
+    assert "Отправьте код вида 123-456" in prompt["text"]
+    assert "max://user/123" in prompt["text"]
+    assert "⬅️ К мероприятию" in _button_texts(prompt)
+
+    await handlers.handle_message(501, "Организатор", 9003, "123456")
+
+    message = fake_bot.sent[-1]
+    assert storage.get_registration(registration.id).status == RegistrationStatus.ATTENDED
+    assert "Запись Анна отмечена как пришедшая" in message["text"]
+    assert "Можно отправить следующий код или профиль" in message["text"]
+    assert storage.get_organizer_state(501).mode == "attendance_lookup"
+    notifications = [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.ATTENDANCE_MARKED
+    ]
+    assert len(notifications) == 1
+
+    await handlers.handle_message(501, "Организатор", 9003, "123-456")
+
+    assert storage.get_registration(registration.id).status == RegistrationStatus.ATTENDED
+    assert len(
+        [
+            item
+            for item in storage.list_notifications()
+            if item.kind == NotificationKind.ATTENDANCE_MARKED
+        ]
+    ) == 1
+    assert "Запись Анна отмечена как пришедшая" in fake_bot.sent[-1]["text"]
+
+
+async def test_organizer_attendance_lookup_marks_by_profile_link(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Пробное занятие")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "234-567",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_attendance_lookup", event_id=event.id).pack(),
+    )
+    await handlers.handle_message(501, "Организатор", 9003, "[Анна](max://user/101)")
+
+    assert storage.get_registration(registration.id).status == RegistrationStatus.ATTENDED
+    assert "Запись Анна отмечена как пришедшая" in fake_bot.sent[-1]["text"]
+
+
+async def test_organizer_attendance_lookup_rejects_other_event_and_canceled_records(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    current_event = create_event(storage, fixed_now, title="Текущий день", capacity=5)
+    other_event = create_event(storage, fixed_now, title="Другой день", capacity=5)
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, current_event.id)
+    storage.ensure_organizer_event(501, other_event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=iter(["111-111", "222-222", "333-333"]).__next__,
+    )
+    for user_id, name in [(101, "Анна"), (102, "Борис"), (103, "Сергей")]:
+        handlers.registration_service.upsert_user(user_id, name)
+        handlers.registration_service.record_profile_consent(user_id, "docs")
+    current_registration = handlers.registration_service.create_registration(
+        101,
+        current_event.id,
+        None,
+    )
+    other_registration = handlers.registration_service.create_registration(
+        102,
+        other_event.id,
+        None,
+    )
+    canceled_registration = handlers.registration_service.create_registration(
+        103,
+        current_event.id,
+        None,
+    )
+    handlers.registration_service.cancel_registration(103, canceled_registration.id)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_attendance_lookup", event_id=current_event.id).pack(),
+    )
+    await handlers.handle_message(501, "Организатор", 9003, "222-222")
+
+    assert storage.get_registration(current_registration.id).status == RegistrationStatus.CONFIRMED
+    assert storage.get_registration(other_registration.id).status == RegistrationStatus.CONFIRMED
+    assert "Запись не найдена" in fake_bot.sent[-1]["text"]
+    assert storage.get_organizer_state(501).mode == "attendance_lookup"
+
+    await handlers.handle_message(501, "Организатор", 9003, "max://user/102")
+
+    assert storage.get_registration(other_registration.id).status == RegistrationStatus.CONFIRMED
+    assert "Запись не найдена" in fake_bot.sent[-1]["text"]
+
+    await handlers.handle_message(501, "Организатор", 9003, "333-333")
+
+    assert (
+        storage.get_registration(canceled_registration.id).status
+        == RegistrationStatus.CANCELED_BY_USER
+    )
+    assert "Отмененную запись нельзя отметить как пришедшую" in fake_bot.sent[-1]["text"]
+
+    await handlers.handle_message(501, "Организатор", 9003, "https://max.ru/u/opaque")
+
+    assert "Не нашел user_id в ссылке" in fake_bot.sent[-1]["text"]
 
 
 async def test_builder_creates_event_with_slots_and_image(

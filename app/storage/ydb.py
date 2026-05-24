@@ -35,6 +35,7 @@ from app.services.reminders import (
     LEGACY_AUTOMATIC_REMINDER_KINDS,
     automatic_reminder_schedule,
 )
+from app.services.registration_codes import normalize_registration_code_input
 from app.storage.base import CodeGenerator, ReminderRenderer
 from app.storage.entities import (
     AuditLog,
@@ -876,6 +877,9 @@ class YdbStorage:
         code: str,
     ) -> Registration:
         self._require_event_access(actor_user_id, event_id)
+        normalized = normalize_registration_code_input(code)
+        if normalized is None:
+            raise RegistrationNotFoundError("Запись не найдена")
         row = self._one(
             """
             DECLARE $event_id AS Int64;
@@ -884,7 +888,7 @@ class YdbStorage:
             WHERE event_id = $event_id AND code = $code
             LIMIT 1;
             """,
-            {"$event_id": _int(event_id), "$code": _utf8(code.strip().upper())},
+            {"$event_id": _int(event_id), "$code": _utf8(normalized)},
         )
         if row is None:
             raise RegistrationNotFoundError("Запись не найдена")
@@ -904,16 +908,76 @@ class YdbStorage:
         return registration
 
     def find_registration_by_code_global(self, code: str) -> Registration | None:
+        normalized = normalize_registration_code_input(code)
+        if normalized is None:
+            return None
         row = self._one(
             """
             DECLARE $code AS Utf8;
             SELECT registration_id FROM registration_codes WHERE code = $code;
             """,
-            {"$code": _utf8(code.strip().upper())},
+            {"$code": _utf8(normalized)},
         )
         if row is None:
             return None
         return self.get_registration(int(row["registration_id"]))
+
+    def rewrite_registration_codes(self, code_generator: CodeGenerator) -> int:
+        def callee(session):
+            with session.transaction(tx_mode=ydb.QuerySerializableReadWrite()) as tx:
+                rows = self._tx_execute(
+                    tx,
+                    """
+                    SELECT id FROM registrations
+                    ORDER BY id;
+                    """,
+                )
+                used_codes: set[str] = set()
+                next_codes: list[tuple[int, str]] = []
+                for row in rows:
+                    code = self._next_unique_rewrite_code(code_generator, used_codes)
+                    used_codes.add(code)
+                    next_codes.append((int(row["id"]), code))
+
+                self._tx_execute(tx, "DELETE FROM registration_codes;")
+                current = utc_now()
+                for registration_id, code in next_codes:
+                    self._tx_execute(
+                        tx,
+                        """
+                        DECLARE $id AS Int64;
+                        DECLARE $code AS Utf8;
+                        DECLARE $updated_at AS Timestamp;
+                        UPDATE registrations
+                        SET code = $code, updated_at = $updated_at
+                        WHERE id = $id;
+                        """,
+                        {
+                            "$id": _int(registration_id),
+                            "$code": _utf8(code),
+                            "$updated_at": _timestamp(current),
+                        },
+                    )
+                    self._tx_execute(
+                        tx,
+                        """
+                        DECLARE $code AS Utf8;
+                        DECLARE $registration_id AS Int64;
+                        UPSERT INTO registration_codes (code, registration_id)
+                        VALUES ($code, $registration_id);
+                        """,
+                        {
+                            "$code": _utf8(code),
+                            "$registration_id": _int(registration_id),
+                        },
+                    )
+                self._tx_execute(tx, "SELECT 1;", commit=True)
+                return len(next_codes)
+
+        return self.pool.retry_operation_sync(
+            callee,
+            retry_settings=ydb.RetrySettings(max_retries=10, idempotent=False),
+        )
 
     def close_registration(self, actor_user_id: int, event_id: int) -> Event:
         self._require_event_access(actor_user_id, event_id)
@@ -1636,6 +1700,17 @@ class YdbStorage:
                 {"$code": _utf8(code)},
             )
             if exists is None:
+                return code
+        raise RuntimeError("Не удалось сгенерировать уникальный код записи")
+
+    @staticmethod
+    def _next_unique_rewrite_code(
+        code_generator: CodeGenerator,
+        used_codes: set[str],
+    ) -> str:
+        for _ in range(20):
+            code = code_generator().strip().upper()
+            if code and code not in used_codes:
                 return code
         raise RuntimeError("Не удалось сгенерировать уникальный код записи")
 

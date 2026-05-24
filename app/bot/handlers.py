@@ -30,6 +30,7 @@ from app.bot.organizer_datetime import (
 from app.bot.payloads import Payload
 from app.domain import (
     AccessDeniedError,
+    AttendanceMarkDeniedError,
     BotDomainError,
     ConsentRequiredError,
     DuplicateActiveRegistrationError,
@@ -51,6 +52,10 @@ from app.enums import (
 from app.services.event_cleanup import ORGANIZER_EVENT_RETENTION_DAYS
 from app.services.organizer import OrganizerService
 from app.services.registration import CodeGenerator, RegistrationService
+from app.services.registration_codes import (
+    extract_max_user_id,
+    normalize_registration_code_input,
+)
 from app.storage.base import Storage
 from app.storage.entities import Event, EventSlot, OrganizerState, Registration
 
@@ -104,6 +109,7 @@ STATE_EDIT_DATE = "edit_date"
 STATE_EDIT_TIME = "edit_time"
 STATE_EDIT_PLACE = "edit_place"
 STATE_MANUAL_REMINDER_TEXT = "manual_reminder_text"
+STATE_ATTENDANCE_LOOKUP = "attendance_lookup"
 CREATE_EVENT_BUTTON_TEXT = "📝 Создать мероприятие"
 TAKE_CURRENT_TEXT = "♻️ ВЗЯТЬ ТЕКУЩЕЕ"
 
@@ -336,6 +342,13 @@ class BotHandlers:
         elif data.action == "org_participants" and data.event_id is not None:
             self.storage.clear_organizer_state(user_id)
             await self._send_organizer_participants(
+                user_id,
+                chat_id,
+                data.event_id,
+                page=self._payload_page(data),
+            )
+        elif data.action == "org_attendance_lookup" and data.event_id is not None:
+            await self._start_attendance_lookup(
                 user_id,
                 chat_id,
                 data.event_id,
@@ -1222,8 +1235,16 @@ class BotHandlers:
                 [
                     callback_button(
                         "👥 Участники",
-                        Payload("org_participants", event_id=event_id),
-                    )
+                        Payload("org_participants", event_id=event_id, value=str(page)),
+                    ),
+                    callback_button(
+                        "🔎 Отметить по коду",
+                        Payload(
+                            "org_attendance_lookup",
+                            event_id=event_id,
+                            value=str(page),
+                        ),
+                    ),
                 ]
             )
         close_buttons = []
@@ -1400,6 +1421,133 @@ class BotHandlers:
                 *inline_keyboard(rows),
             ],
             format="markdown",
+        )
+
+    async def _start_attendance_lookup(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        event_id: int,
+        *,
+        page: int = 0,
+    ) -> None:
+        self._organizer_event_for_actor(user_id, event_id)
+        state = OrganizerState(
+            user_id=user_id,
+            mode=STATE_ATTENDANCE_LOOKUP,
+            event_id=event_id,
+            step=STATE_ATTENDANCE_LOOKUP,
+            data={"page": page},
+            updated_at=self.now(),
+        )
+        self.storage.set_organizer_state(state)
+        await self._send_attendance_lookup_prompt(user_id, chat_id, state)
+
+    async def _handle_attendance_lookup_message(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        state: OrganizerState,
+        text: str,
+    ) -> None:
+        if not text:
+            await self._send_attendance_lookup_prompt(
+                user_id,
+                chat_id,
+                state,
+                prefix="Отправьте код или профильную ссылку одним сообщением.",
+            )
+            return
+        assert state.event_id is not None
+        participant_user_id = extract_max_user_id(text)
+        try:
+            if participant_user_id is not None:
+                registration = self.organizer_service.mark_attended_by_event_user(
+                    user_id,
+                    state.event_id,
+                    participant_user_id,
+                )
+            else:
+                if self._looks_like_max_profile_link(text):
+                    await self._send_attendance_lookup_prompt(
+                        user_id,
+                        chat_id,
+                        state,
+                        prefix=(
+                            "Не нашел user_id в ссылке. Отправьте профильную ссылку "
+                            "из списка участников или код вида 123-456."
+                        ),
+                    )
+                    return
+                code = normalize_registration_code_input(text)
+                if code is None:
+                    await self._send_attendance_lookup_prompt(
+                        user_id,
+                        chat_id,
+                        state,
+                        prefix=(
+                            "Не разобрал код. Подойдет формат 123-456 или 123456."
+                        ),
+                    )
+                    return
+                registration = self.organizer_service.mark_attended_by_event_code(
+                    user_id,
+                    state.event_id,
+                    code,
+                )
+        except BotDomainError as exc:
+            await self._send_attendance_lookup_prompt(
+                user_id,
+                chat_id,
+                state,
+                prefix=self._friendly_error(exc),
+            )
+            return
+
+        await self._send_attendance_lookup_prompt(
+            user_id,
+            chat_id,
+            state,
+            prefix=(
+                f"Запись {self._participant_name(registration)} отмечена как пришедшая.\n"
+                "Можно отправить следующий код или профиль."
+            ),
+        )
+
+    async def _send_attendance_lookup_prompt(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        state: OrganizerState,
+        *,
+        prefix: str | None = None,
+    ) -> None:
+        assert state.event_id is not None
+        event = self._organizer_event_for_actor(user_id, state.event_id)
+        text = (
+            "🔎 Отметка по коду\n\n"
+            f"Мероприятие: {event.title}\n"
+            "Отправьте код вида 123-456 или профильную ссылку MAX вида "
+            "max://user/123.\n"
+            "После успешной отметки можно отправлять следующий код или профиль."
+        )
+        if prefix:
+            text = f"{prefix}\n\n{text}"
+        page = int(state.data.get("page") or 0)
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=text,
+            attachments=inline_keyboard(
+                [
+                    [
+                        callback_button(
+                            "⬅️ К мероприятию",
+                            Payload("org_event", event_id=event.id, value=str(page)),
+                        )
+                    ]
+                ]
+            ),
         )
 
     async def _send_organizer_close_confirmation(
@@ -1723,6 +1871,9 @@ class BotHandlers:
                 chat_id,
                 custom_text=text,
             )
+            return
+        if state.mode == STATE_ATTENDANCE_LOOKUP:
+            await self._handle_attendance_lookup_message(user_id, chat_id, state, text)
             return
         if state.mode in {BUILDER_MODE_CREATE, BUILDER_MODE_EDIT}:
             await self._handle_builder_message(user_id, chat_id, state, text, attachments)
@@ -2416,6 +2567,8 @@ class BotHandlers:
             return "У вас нет доступа к этому действию."
         if isinstance(exc, EventStartInPastError):
             return "Дата и время мероприятия уже прошли."
+        if isinstance(exc, AttendanceMarkDeniedError):
+            return "Отмененную запись нельзя отметить как пришедшую."
         return str(exc)
 
     @staticmethod
@@ -2477,6 +2630,11 @@ class BotHandlers:
     @staticmethod
     def _markdown_link_text(value: str) -> str:
         return "".join(f"\\{char}" if char in "\\[]()" else char for char in value)
+
+    @staticmethod
+    def _looks_like_max_profile_link(value: str) -> bool:
+        normalized = (value or "").casefold()
+        return "max://user/" in normalized or "max.ru/" in normalized
 
     @classmethod
     def _format_status_for_user(cls, status: RegistrationStatus) -> str:

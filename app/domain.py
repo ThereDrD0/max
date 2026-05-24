@@ -55,3 +55,7 @@ class InvalidNotificationKindError(BotDomainError):
 
 class EventStartInPastError(BotDomainError):
     pass
+
+
+class AttendanceMarkDeniedError(BotDomainError):
+    pass
