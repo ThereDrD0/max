@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from secrets import compare_digest
 from threading import RLock
 
@@ -12,6 +12,7 @@ from app.bot.client import BotClient, MaxApiBotClient
 from app.bot.dispatcher import dispatch_update
 from app.bootstrap import sync_roles_from_settings
 from app.config import Settings, get_settings
+from app.services.event_cleanup import EVENT_CLEANUP_INTERVAL, EventCleanupService
 from app.services.notification_worker import NotificationWorker
 from app.storage.base import Storage
 from app.storage.factory import create_storage
@@ -28,6 +29,8 @@ def create_function_handler(
     resolved_storage = storage or create_storage(resolved_settings)
     resolved_bot_client = bot_client or MaxApiBotClient(resolved_settings.max_bot_token)
     async_runner = _AsyncRunner()
+    cleanup_scheduler = _CleanupScheduler(resolved_storage, now=now)
+    cleanup_scheduler.run(force=True)
     sync_roles_from_settings(resolved_storage, resolved_settings)
 
     def handler(event, context):
@@ -37,6 +40,7 @@ def create_function_handler(
                     resolved_storage,
                     resolved_bot_client,
                     resolved_settings,
+                    cleanup_scheduler,
                     now,
                 )
             )
@@ -88,8 +92,10 @@ async def _handle_timer(
     storage: Storage,
     bot_client: BotClient,
     settings: Settings,
+    cleanup_scheduler: "_CleanupScheduler",
     now: Callable[[], datetime] | None,
 ) -> dict:
+    removed_events = cleanup_scheduler.run()
     worker = NotificationWorker(
         storage,
         bot_client,
@@ -97,7 +103,7 @@ async def _handle_timer(
         max_rps=settings.max_api_rps,
     )
     sent = await worker.process_due(limit=100)
-    return _response(200, {"ok": True, "sent": sent})
+    return _response(200, {"ok": True, "sent": sent, "removed_events": removed_events})
 
 
 def _is_timer_event(event: dict) -> bool:
@@ -149,6 +155,31 @@ class _AsyncRunner:
             self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         return self._loop
+
+
+class _CleanupScheduler:
+    def __init__(
+        self,
+        storage: Storage,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.service = EventCleanupService(storage, now=now)
+        self.now = now or (lambda: datetime.now(timezone.utc))
+        self._last_run: datetime | None = None
+        self._lock = RLock()
+
+    def run(self, *, force: bool = False) -> int:
+        current = self.now()
+        with self._lock:
+            if (
+                not force
+                and self._last_run is not None
+                and current - self._last_run < EVENT_CLEANUP_INTERVAL
+            ):
+                return 0
+            self._last_run = current
+        return self.service.cleanup(now=current)
 
 
 def _run_async(coro, runner: _AsyncRunner | None = None):

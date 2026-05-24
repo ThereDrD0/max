@@ -119,7 +119,7 @@ async def test_deeplink_unavailable_event_hides_booking_button(storage, fake_bot
     assert "📝 Записаться" not in _button_texts(message)
 
 
-async def test_deeplink_started_event_hides_booking_button(storage, fake_bot, fixed_now):
+async def test_deeplink_started_event_shows_unavailable_message(storage, fake_bot, fixed_now):
     event = create_event(storage, fixed_now, title="Уже началось")
     storage.update_event_start(event.id, fixed_now - timedelta(hours=1))
     storage.assign_event_slug(event.id, "started-event", now=fixed_now)
@@ -130,7 +130,8 @@ async def test_deeplink_started_event_hides_booking_button(storage, fake_bot, fi
     await handlers.handle_bot_started(101, "Анна", 9001, start_payload="e_started-event")
 
     message = fake_bot.sent[-1]
-    assert "Мероприятие уже началось." in message["text"]
+    assert "Ссылка на мероприятие устарела или неверна." in message["text"]
+    assert "ℹ️ Уже началось" not in message["text"]
     assert "📝 Записаться" not in _button_texts(message)
 
 

@@ -148,9 +148,88 @@ async def test_main_menu_buttons_open_current_sections(
     assert "🏠 Главное меню" in _button_texts(fake_bot.sent[-1])
 
     await handlers.handle_callback(501, "Организатор", 9003, Payload("org_menu").pack())
-    assert "🧑‍💼 Ваши мероприятия" in fake_bot.sent[-1]["text"]
+    assert "🧑‍💼📚 Книга мероприятий Организатора" in fake_bot.sent[-1]["text"]
     assert "Пробное занятие по Python" in fake_bot.sent[-1]["text"]
     assert "🏠 Главное меню" in _button_texts(fake_bot.sent[-1])
+    assert _has_local_organizer_menu_image(fake_bot.sent[-1])
+
+
+async def test_organizer_menu_paginates_and_returns_to_same_page(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    events = []
+    for day in range(1, 14):
+        event = create_event(
+            storage,
+            fixed_now,
+            title=f"Мероприятие {day}",
+            starts_in=timedelta(days=day),
+        )
+        events.append(event)
+        storage.ensure_organizer_event(501, event.id)
+    storage.ensure_role(501, "organizer")
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_message(501, "Организатор", 9003, "/organizer")
+
+    first_page = fake_bot.sent[-1]
+    assert "🧑‍💼📚 Книга мероприятий Организатора" in first_page["text"]
+    assert "Страница 1/3" in first_page["text"]
+    assert "🔥 БЛИЖАЙШИЕ" in first_page["text"]
+    for day in range(1, 6):
+        assert f"Мероприятие {day}" in first_page["text"]
+    assert "Мероприятие 6" not in first_page["text"]
+    assert _has_local_organizer_menu_image(first_page)
+
+    first_buttons = _buttons(first_page)
+    first_by_text = {button["text"]: button for button in first_buttons}
+    manage_buttons = [
+        button for button in first_buttons if button["text"].startswith("🧑‍💼 ")
+    ]
+    assert len(manage_buttons) == 5
+    assert first_by_text["⬅️ Назад"]["payload"] == Payload("org_menu", value="2").pack()
+    assert first_by_text["➡️ Далее"]["payload"] == Payload("org_menu", value="1").pack()
+
+    await handlers.handle_callback(
+        501,
+        "Организатор",
+        9003,
+        Payload("org_menu", value="2").pack(),
+    )
+
+    last_page = fake_bot.sent[-1]
+    last_buttons = _buttons(last_page)
+    last_by_text = {button["text"]: button for button in last_buttons}
+    assert "Страница 3/3" in last_page["text"]
+    assert "Мероприятие 13" in last_page["text"]
+    assert last_by_text["⬅️ Назад"]["payload"] == Payload("org_menu", value="1").pack()
+    assert last_by_text["➡️ Далее"]["payload"] == Payload("org_menu", value="0").pack()
+
+    manage_last = next(
+        button
+        for button in last_buttons
+        if button["text"].startswith("🧑‍💼 13. Управлять:")
+    )
+    assert manage_last["payload"] == Payload(
+        "org_event",
+        event_id=events[12].id,
+        value="2",
+    ).pack()
+
+    await handlers.handle_callback(
+        501,
+        "Организатор",
+        9003,
+        manage_last["payload"],
+    )
+
+    event_menu_buttons = {button["text"]: button for button in _buttons(fake_bot.sent[-1])}
+    assert event_menu_buttons["⬅️ Назад"]["payload"] == Payload(
+        "org_menu",
+        value="2",
+    ).pack()
 
 
 async def test_main_menu_callback_returns_to_role_aware_main_menu(
@@ -251,6 +330,34 @@ async def test_catalog_hides_raw_ids_in_prod_and_keeps_buttons_short(
     assert not any("📝" in text for text in flattened)
 
 
+async def test_catalog_hides_full_events_and_omits_place_status(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    available = create_event(storage, fixed_now, title="Доступное мероприятие")
+    full = create_event(storage, fixed_now, title="Заполненное мероприятие", capacity=1)
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers.registration_service.upsert_user(202, "Борис")
+    handlers.registration_service.record_profile_consent(202, "docs")
+    handlers.registration_service.create_registration(202, full.id, None)
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+
+    await handlers.handle_message(101, "Анна", 9001, "/events")
+
+    message = fake_bot.sent[-1]
+    assert "Доступное мероприятие" in message["text"]
+    assert "Заполненное мероприятие" not in message["text"]
+    assert "есть места" not in message["text"]
+    assert "мест нет" not in message["text"]
+    assert "🕒 90 мин. · очно" in message["text"]
+    assert "⏱" not in message["text"]
+    assert len(
+        [button for button in _buttons(message) if button["text"].startswith("ℹ️ Подробнее: ")]
+    ) == 1
+
+
 async def test_catalog_opens_event_detail_before_booking(
     storage, fake_bot, fixed_now
 ):
@@ -318,8 +425,9 @@ async def test_catalog_book_first_page_highlights_soon_events_without_duplicates
     assert "Страница 1/2" in message["text"]
     assert "Листайте книгу кнопками ниже" in message["text"]
     assert "🔥 УЖЕ СКОРО" in message["text"]
-    for day in range(1, 7):
+    for day in range(1, 6):
         assert message["text"].count(f"Событие {day}") == 1
+    assert "Событие 6" not in message["text"]
     assert "Событие 7" not in message["text"]
     soon_text = message["text"].split("🔥 УЖЕ СКОРО", 1)[1].split("Событие 4", 1)[0]
     assert soon_text.count("Событие ") == 3
@@ -327,7 +435,7 @@ async def test_catalog_book_first_page_highlights_soon_events_without_duplicates
     buttons = _buttons(message)
     button_texts = [button["text"] for button in buttons]
     detail_buttons = [text for text in button_texts if text.startswith("ℹ️ Подробнее:")]
-    assert len(detail_buttons) == 6
+    assert len(detail_buttons) == 5
     assert "🎫 Мои записи" not in button_texts
     assert "⬅️ Назад" in button_texts
     assert "➡️ Далее" in button_texts
@@ -824,6 +932,15 @@ def _has_local_main_menu_image(message: dict) -> bool:
     return any(
         getattr(attachment, "path", "").replace("\\", "/").endswith(
             "app/assets/main-menu.png"
+        )
+        for attachment in message["attachments"]
+    )
+
+
+def _has_local_organizer_menu_image(message: dict) -> bool:
+    return any(
+        getattr(attachment, "path", "").replace("\\", "/").endswith(
+            "app/assets/organizer-menu.png"
         )
         for attachment in message["attachments"]
     )

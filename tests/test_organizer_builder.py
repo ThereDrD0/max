@@ -82,7 +82,10 @@ async def test_organizer_menu_allows_role_to_create_event_without_existing_event
     await handlers.handle_message(501, "Организатор", 9003, "/organizer")
 
     message = fake_bot.sent[-1]
+    assert "🧑‍💼📚 Книга мероприятий Организатора" in message["text"]
+    assert "Пока в книге Организатора нет мероприятий" in message["text"]
     assert "Создать мероприятие" in _button_texts(message)
+    assert _has_local_organizer_menu_image(message)
     assert "нет доступа" not in message["text"].lower()
 
 
@@ -200,6 +203,87 @@ async def test_builder_creates_event_with_slots_and_image(
     assert "🧑‍💼 МЕНЮ ОРГАНИЗАТОРА" in fake_bot.sent[-1]["text"]
 
 
+async def test_builder_rejects_past_event_date(storage, fake_bot, fixed_now):
+    storage.ensure_role(501, "organizer")
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(501, "Организатор", 9003, Payload("org_create").pack())
+    await handlers.handle_message(501, "Организатор", 9003, "Новый день ИТ")
+    await handlers.handle_message(501, "Организатор", 9003, "Описание")
+    await handlers.handle_message(501, "Организатор", 9003, "Требования")
+    await handlers.handle_message(501, "Организатор", 9003, "20.05.2026")
+
+    state = storage.get_organizer_state(501)
+    assert state is not None
+    assert state.step == "date"
+    assert "Дата уже прошла" in fake_bot.sent[-1]["text"]
+    assert storage.list_organizer_events(501) == []
+
+
+async def test_builder_rejects_today_time_that_already_passed_in_moscow(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    storage.ensure_role(501, "organizer")
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(501, "Организатор", 9003, Payload("org_create").pack())
+    await handlers.handle_message(501, "Организатор", 9003, "Новый день ИТ")
+    await handlers.handle_message(501, "Организатор", 9003, "Описание")
+    await handlers.handle_message(501, "Организатор", 9003, "Требования")
+    await handlers.handle_message(501, "Организатор", 9003, "21.05.2026")
+    await handlers.handle_message(501, "Организатор", 9003, "11:59")
+
+    state = storage.get_organizer_state(501)
+    assert state is not None
+    assert state.step == "time"
+    assert "Время уже прошло" in fake_bot.sent[-1]["text"]
+    assert storage.list_organizer_events(501) == []
+
+
+async def test_builder_accepts_today_future_time_in_moscow(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    storage.ensure_role(501, "organizer")
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(501, "Организатор", 9003, Payload("org_create").pack())
+    await handlers.handle_message(501, "Организатор", 9003, "Новый день ИТ")
+    await handlers.handle_message(501, "Организатор", 9003, "Описание")
+    await handlers.handle_message(501, "Организатор", 9003, "Требования")
+    await handlers.handle_message(501, "Организатор", 9003, "21.05.2026")
+    await handlers.handle_message(501, "Организатор", 9003, "12:01")
+
+    state = storage.get_organizer_state(501)
+    assert state is not None
+    assert state.step == "duration"
+    assert state.data["time"] == "12:01"
+
+
+async def test_edit_datetime_rejects_past_combination(storage, fake_bot, fixed_now):
+    event = create_event(storage, fixed_now, title="Пробное занятие")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(
+        501,
+        "Организатор",
+        9003,
+        Payload("org_edit_date", event_id=event.id).pack(),
+    )
+    await handlers.handle_message(501, "Организатор", 9003, "20.05.2026")
+
+    state = storage.get_organizer_state(501)
+    assert state is not None
+    assert state.mode == "edit_date"
+    assert storage.get_event(event.id).starts_at == event.starts_at
+    assert "Дата и время уже прошли" in fake_bot.sent[-1]["text"]
+
+
 async def test_builder_slot_prompt_explains_slots_and_uses_consistent_buttons(
     storage,
     fake_bot,
@@ -277,7 +361,7 @@ async def test_builder_can_be_cancelled_only_after_confirmation(
     )
 
     assert storage.get_organizer_state(501) is None
-    assert "Ваши мероприятия" in fake_bot.sent[-1]["text"]
+    assert "Книга мероприятий Организатора" in fake_bot.sent[-1]["text"]
 
 
 async def test_rebuild_builder_can_take_current_values(storage, fake_bot, fixed_now):
@@ -371,7 +455,16 @@ def _buttons(message: dict) -> list[dict]:
     return [
         button
         for attachment in message["attachments"]
-        if attachment["type"] == "inline_keyboard"
+        if isinstance(attachment, dict) and attachment["type"] == "inline_keyboard"
         for row in attachment["payload"]["buttons"]
         for button in row
     ]
+
+
+def _has_local_organizer_menu_image(message: dict) -> bool:
+    return any(
+        getattr(attachment, "path", "").replace("\\", "/").endswith(
+            "app/assets/organizer-menu.png"
+        )
+        for attachment in message["attachments"]
+    )

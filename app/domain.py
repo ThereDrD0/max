@@ -51,3 +51,7 @@ class LateCancellationDeniedError(BotDomainError):
 
 class InvalidNotificationKindError(BotDomainError):
     pass
+
+
+class EventStartInPastError(BotDomainError):
+    pass

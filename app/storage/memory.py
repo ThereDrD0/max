@@ -327,6 +327,17 @@ class MemoryStorage:
             self._attach_event_image(event)
         return sorted(events, key=lambda item: item.starts_at)
 
+    def delete_expired_events(self, *, expired_before: datetime) -> int:
+        with self._lock:
+            event_ids = [
+                event.id
+                for event in self.events.values()
+                if event.starts_at <= expired_before
+            ]
+            for event_id in event_ids:
+                self._delete_event_cascade(event_id)
+            return len(event_ids)
+
     def set_event_image(
         self,
         actor_user_id: int,
@@ -916,6 +927,53 @@ class MemoryStorage:
         event.image_token = image[0]
         event.image_url = image[1]
         return event
+
+    def _delete_event_cascade(self, event_id: int) -> None:
+        registration_ids = {
+            registration.id
+            for registration in self.registrations.values()
+            if registration.event_id == event_id
+        }
+        registration_id_texts = {str(registration_id) for registration_id in registration_ids}
+
+        for registration_id in list(registration_ids):
+            registration = self.registrations.pop(registration_id, None)
+            if registration is None:
+                continue
+            self.registration_codes.pop(registration.code, None)
+            self.active_registration_keys.pop(
+                self._active_key(registration.user_id, registration.event_id),
+                None,
+            )
+
+        for slot_id, slot in list(self.slots.items()):
+            if slot.event_id == event_id:
+                self.slots.pop(slot_id, None)
+        for organizer_event_id, organizer_event in list(self.organizer_events.items()):
+            if organizer_event.event_id == event_id:
+                self.organizer_events.pop(organizer_event_id, None)
+        for notification_id, notification in list(self.notifications.items()):
+            if notification.event_id == event_id or notification.registration_id in registration_ids:
+                self.notifications.pop(notification_id, None)
+        for slug, linked_event_id in list(self.event_deeplinks.items()):
+            if linked_event_id == event_id:
+                self.event_deeplinks.pop(slug, None)
+        self.event_images.pop(event_id, None)
+        for user_id, pending in list(self.pending_event_images.items()):
+            if pending[0] == event_id:
+                self.pending_event_images.pop(user_id, None)
+        for user_id, state in list(self.organizer_states.items()):
+            if state.event_id == event_id:
+                self.organizer_states.pop(user_id, None)
+        for audit_id, audit in list(self.audit_log.items()):
+            if (
+                audit.entity_type == "event"
+                and audit.entity_id == str(event_id)
+                or audit.entity_type == "registration"
+                and audit.entity_id in registration_id_texts
+            ):
+                self.audit_log.pop(audit_id, None)
+        self.events.pop(event_id, None)
 
     @staticmethod
     def _active_key(user_id: int, event_id: int) -> str:

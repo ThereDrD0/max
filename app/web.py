@@ -11,6 +11,7 @@ from app.bot.client import BotClient, MaxApiBotClient
 from app.bot.dispatcher import dispatch_update
 from app.bootstrap import sync_roles_from_settings
 from app.config import Settings, get_settings
+from app.services.event_cleanup import EventCleanupService
 from app.storage.base import Storage
 from app.storage.factory import create_storage
 
@@ -27,6 +28,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        EventCleanupService(resolved_storage).cleanup()
         sync_roles_from_settings(resolved_storage, resolved_settings)
         yield
 

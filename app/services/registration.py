@@ -59,7 +59,12 @@ class RegistrationService:
         return self.storage.has_profile_consent(user_id)
 
     def list_events(self) -> list[Event]:
-        return self.storage.list_events(starts_at_from=self.now())
+        current = self.now()
+        return [
+            event
+            for event in self.storage.list_events(starts_at_from=current)
+            if event.starts_at > current
+        ]
 
     def available_places(self, event_id: int, slot_id: int | None) -> int:
         return self.storage.available_places(event_id, slot_id)

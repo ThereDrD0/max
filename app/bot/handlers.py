@@ -34,6 +34,7 @@ from app.domain import (
     ConsentRequiredError,
     DuplicateActiveRegistrationError,
     DuplicateEventSlugError,
+    EventStartInPastError,
     LateCancellationDeniedError,
     NoSeatsAvailableError,
     RegistrationClosedError,
@@ -46,6 +47,7 @@ from app.enums import (
     NotificationKind,
     RegistrationStatus,
 )
+from app.services.event_cleanup import ORGANIZER_EVENT_RETENTION_DAYS
 from app.services.organizer import OrganizerService
 from app.services.registration import CodeGenerator, RegistrationService
 from app.storage.base import Storage
@@ -75,9 +77,12 @@ ORGANIZER_COMMAND_LINES = (
     "/find КОД — найти запись по коду, доступно организаторам",
 )
 
-CATALOG_PAGE_SIZE = 6
+CATALOG_PAGE_SIZE = 5
 CATALOG_SOON_COUNT = 3
 MAIN_MENU_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "main-menu.png"
+ORGANIZER_MENU_IMAGE_PATH = (
+    Path(__file__).resolve().parents[1] / "assets" / "organizer-menu.png"
+)
 _SEND_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 _SEND_LOCKS_GUARD = Lock()
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -301,10 +306,19 @@ class BotHandlers:
             await self._send(user_id=user_id, chat_id=chat_id, text=text)
         elif data.action == "org_menu":
             self.storage.clear_organizer_state(user_id)
-            await self._send_organizer_menu(user_id, chat_id)
+            await self._send_organizer_menu(
+                user_id,
+                chat_id,
+                page=self._payload_page(data),
+            )
         elif data.action == "org_event" and data.event_id is not None:
             self.storage.clear_organizer_state(user_id)
-            await self._send_organizer_event(user_id, chat_id, data.event_id)
+            await self._send_organizer_event(
+                user_id,
+                chat_id,
+                data.event_id,
+                page=self._payload_page(data),
+            )
         elif data.action == "org_create":
             await self._start_event_builder(user_id, chat_id, mode=BUILDER_MODE_CREATE)
         elif data.action == "org_rebuild" and data.event_id is not None:
@@ -413,6 +427,9 @@ class BotHandlers:
         if event is None:
             await self._send_invalid_deeplink_entrypoint(user_id, chat_id)
             return
+        if not self._event_visible_to_users(event):
+            await self._send_invalid_deeplink_entrypoint(user_id, chat_id)
+            return
         if not self.registration_service.has_profile_consent(user_id):
             await self._send(
                 user_id=user_id,
@@ -505,7 +522,14 @@ class BotHandlers:
     ) -> None:
         if not self.registration_service.has_profile_consent(user_id):
             raise ConsentRequiredError("Нужно согласие")
-        events = self.registration_service.list_events()
+        events = [
+            event
+            for event in self.registration_service.list_events()
+            if (
+                not event.registration_closed
+                and self.registration_service.available_places(event.id, None) > 0
+            )
+        ]
         if not events:
             await self._send(
                 user_id=user_id,
@@ -531,14 +555,11 @@ class BotHandlers:
         rows: list[list[dict]] = []
 
         def add_event_to_catalog(offset: int, event: Event) -> None:
-            free = self.registration_service.available_places(event.id, None)
-            place_text = "✅ есть места" if free > 0 and not event.registration_closed else "⛔ мест нет или регистрация закрыта"
             dev_line = f"\n[DEV] event_id={event.id}" if self.dev_mode else ""
             lines.append(
                 f"\n{offset}. {event.title}{dev_line}\n"
                 f"📅 {self._format_datetime(event.starts_at)}\n"
-                f"⏱ {event.duration_minutes} мин. · {self._format_event_format(event)}\n"
-                f"{place_text}"
+                f"🕒 {event.duration_minutes} мин. · {self._format_event_format(event)}"
             )
             rows.append(
                 [
@@ -605,6 +626,9 @@ class BotHandlers:
         event = self.storage.get_event(event_id)
         if event is None:
             raise RegistrationClosedError("Мероприятие недоступно")
+        if not self._event_visible_to_users(event):
+            await self._send_event_unavailable_for_user(user_id, chat_id)
+            return
         free = self.registration_service.available_places(event.id, None)
         dev_line = f"\n[DEV] event_id={event.id}" if self.dev_mode else ""
         active_registration = self._active_registration_for_event(user_id, event.id)
@@ -688,7 +712,7 @@ class BotHandlers:
         event = self.storage.get_event(event_id)
         if event is None:
             raise RegistrationClosedError("Мероприятие недоступно")
-        if event.registration_closed or event.starts_at <= self.now():
+        if event.registration_closed or not self._event_visible_to_users(event):
             raise RegistrationClosedError("Регистрация на мероприятие закрыта")
         if self.registration_service.available_places(event.id, None) <= 0:
             raise NoSeatsAvailableError("Свободных мест нет")
@@ -840,7 +864,11 @@ class BotHandlers:
         )
 
     def _visible_user_registrations(self, user_id: int) -> list[Registration]:
-        registrations = self.registration_service.list_user_registrations(user_id)
+        registrations = [
+            registration
+            for registration in self.registration_service.list_user_registrations(user_id)
+            if registration.event is not None and self._event_visible_to_users(registration.event)
+        ]
         active_event_ids = {
             registration.event_id
             for registration in registrations
@@ -864,6 +892,9 @@ class BotHandlers:
         registration = self.storage.get_registration(registration_id)
         if registration is None or registration.user_id != user_id:
             raise RegistrationNotFoundError("Запись не найдена")
+        if registration.event is not None and not self._event_visible_to_users(registration.event):
+            await self._send_event_unavailable_for_user(user_id, chat_id)
+            return
         event_title = registration.event.title if registration.event else "мероприятие"
         await self._send(
             user_id=user_id,
@@ -903,6 +934,8 @@ class BotHandlers:
         self,
         user_id: int,
         chat_id: int | None,
+        *,
+        page: int = 0,
     ) -> None:
         events = self.organizer_service.list_events(user_id)
         if not events and not self.organizer_service.can_use_menu(user_id):
@@ -913,30 +946,99 @@ class BotHandlers:
                 attachments=inline_keyboard([[self._main_menu_button()]]),
             )
             return
-        rows = [
+        upcoming_events = [event for event in events if self._event_visible_to_users(event)]
+        past_events = [event for event in events if not self._event_visible_to_users(event)]
+        book_events = [
+            *[("upcoming", event) for event in upcoming_events],
+            *[("past", event) for event in past_events],
+        ]
+        rows: list[list[dict]] = []
+
+        if not book_events:
+            text = (
+                "🧑‍💼📚 Книга мероприятий Организатора\n"
+                "Страница 1/1\n\n"
+                "✨ Пока в книге Организатора нет мероприятий. "
+                "Создайте первое — оно появится здесь сразу после заполнения."
+            )
+            rows.append([callback_button("➕ Создать мероприятие", Payload("org_create"))])
+            rows.append([self._main_menu_button()])
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=text,
+                attachments=[
+                    local_image_attachment(ORGANIZER_MENU_IMAGE_PATH),
+                    *inline_keyboard(rows),
+                ],
+            )
+            return
+
+        total_pages = max(ceil(len(book_events) / CATALOG_PAGE_SIZE), 1)
+        page = max(min(page, total_pages - 1), 0)
+        first_offset = 1 + page * CATALOG_PAGE_SIZE
+        page_events = book_events[
+            page * CATALOG_PAGE_SIZE : (page + 1) * CATALOG_PAGE_SIZE
+        ]
+        lines = [
+            "🧑‍💼📚 Книга мероприятий Организатора",
+            f"Страница {page + 1}/{total_pages}",
+            "",
+            "Листайте книгу кнопками ниже и открывайте управление нужным мероприятием. 🗂️",
+        ]
+        current_section: str | None = None
+        section_titles = {
+            "upcoming": "🔥 БЛИЖАЙШИЕ",
+            "past": "🕘 ПРОШЕДШИЕ",
+        }
+
+        for offset, (section, event) in enumerate(page_events, start=first_offset):
+            if section != current_section:
+                lines.append(f"\n{section_titles[section]}")
+                current_section = section
+            dev_line = f"\n[DEV] event_id={event.id}" if self.dev_mode else ""
+            lines.append(
+                f"\n{offset}. {event.title}{dev_line}\n"
+                f"📅 {self._format_datetime(event.starts_at)}\n"
+                f"🕒 {event.duration_minutes} мин. · {self._format_event_format(event)}"
+            )
+            if section == "past":
+                lines.append(
+                    f"🧹 Удалится через {self._days_until_event_cleanup(event)} дн."
+                )
+            rows.append(
+                [
+                    callback_button(
+                        f"🧑‍💼 {offset}. Управлять: {self._short_button_title(event.title)}",
+                        Payload("org_event", event_id=event.id, value=str(page)),
+                    )
+                ]
+            )
+
+        previous_page = (page - 1) % total_pages
+        next_page = (page + 1) % total_pages
+        rows.append(
             [
                 callback_button(
-                    f"🧑‍💼 {index}. Управлять: {self._short_button_title(event.title)}",
-                    Payload("org_event", event_id=event.id),
-                )
+                    "⬅️ Назад",
+                    Payload("org_menu", value=str(previous_page)),
+                ),
+                callback_button(
+                    "➡️ Далее",
+                    Payload("org_menu", value=str(next_page)),
+                ),
             ]
-            for index, event in enumerate(events, start=1)
-        ]
+        )
         rows.append([callback_button("➕ Создать мероприятие", Payload("org_create"))])
         rows.append([self._main_menu_button()])
-        text = "🧑‍💼 Ваши мероприятия"
-        if events:
-            text += ":\n" + "\n".join(
-                f"{index}. {event.title}"
-                for index, event in enumerate(events, start=1)
-            )
-        else:
-            text += " пока пусты. Можно создать первое."
         await self._send(
             user_id=user_id,
             chat_id=chat_id,
-            text=text,
-            attachments=inline_keyboard(rows),
+            text="\n".join(lines),
+            attachments=[
+                local_image_attachment(ORGANIZER_MENU_IMAGE_PATH),
+                *inline_keyboard(rows),
+            ],
         )
 
     async def _send_organizer_event(
@@ -944,6 +1046,8 @@ class BotHandlers:
         user_id: int,
         chat_id: int | None,
         event_id: int,
+        *,
+        page: int = 0,
     ) -> None:
         self.organizer_service.get_event_registrations(user_id, event_id)
         event = self.storage.get_event(event_id)
@@ -968,15 +1072,22 @@ class BotHandlers:
                 )
             ],
         ]
-        deeplink = await self._event_deeplink(event)
+        deeplink = await self._event_deeplink(event) if self._event_visible_to_users(event) else None
         if deeplink:
             rows.append([clipboard_button("🔗 Поделиться", deeplink)])
-        rows.append([callback_button("⬅️ Назад", Payload("org_menu"))])
+        rows.append([callback_button("⬅️ Назад", Payload("org_menu", value=str(page)))])
         free = self.registration_service.available_places(event.id, None)
         share_text = "\n\n🔗 Ссылка: Нажмите чтобы скопировать" if deeplink else ""
+        status_text = ""
+        if not self._event_visible_to_users(event):
+            status_text = (
+                "\n\nМероприятие уже началось или завершилось. "
+                f"В меню организатора оно будет ещё {self._days_until_event_cleanup(event)} дн."
+            )
         public_text = self._event_public_text(
             event,
             free_places=free,
+            status_text=status_text,
             share_text=share_text,
         )
         await self._send(
@@ -1147,6 +1258,16 @@ class BotHandlers:
                 text="Не разобрал значение. Пример даты: 12.03 или 12 марта. Пример времени: 12:30.",
             )
             return
+        if not self._event_start_is_future(starts_at):
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=(
+                    "Дата и время уже прошли. "
+                    "Укажите момент позже текущего московского времени."
+                ),
+            )
+            return
         event = self.organizer_service.reschedule_event(user_id, event.id, starts_at)
         self.storage.clear_organizer_state(user_id)
         await self._send_organizer_event(user_id, chat_id, event.id)
@@ -1225,18 +1346,38 @@ class BotHandlers:
             return
         if state.step == "date":
             try:
-                value = parse_organizer_date(text, today=self.now().astimezone(MOSCOW_TZ).date()).isoformat()
+                local_today = self.now().astimezone(MOSCOW_TZ).date()
+                day = parse_organizer_date(text, today=local_today)
             except ValueError:
                 await self._send_builder_prompt(user_id, chat_id, state, prefix="Не разобрал дату.")
                 return
+            if day < local_today:
+                await self._send_builder_prompt(
+                    user_id,
+                    chat_id,
+                    state,
+                    prefix="Дата уже прошла. Введите сегодняшнюю или будущую дату.",
+                )
+                return
+            value = day.isoformat()
             await self._advance_builder(user_id, chat_id, state, "date", value, "time")
             return
         if state.step == "time":
             try:
-                value = self._serialize_time(parse_organizer_time(text))
+                clock = parse_organizer_time(text)
             except ValueError:
                 await self._send_builder_prompt(user_id, chat_id, state, prefix="Не разобрал время.")
                 return
+            day = date.fromisoformat(str(state.data["date"]))
+            if not self._event_start_is_future(combine_moscow_datetime(day, clock)):
+                await self._send_builder_prompt(
+                    user_id,
+                    chat_id,
+                    state,
+                    prefix="Время уже прошло. Введите время позже текущего московского.",
+                )
+                return
+            value = self._serialize_time(clock)
             await self._advance_builder(user_id, chat_id, state, "time", value, "duration")
             return
         if state.step == "duration":
@@ -1403,6 +1544,16 @@ class BotHandlers:
     ) -> None:
         event = self._event_from_builder_state(state)
         slots = self._slots_from_builder_state(state)
+        if not self._event_start_is_future(event.starts_at):
+            state.step = "time"
+            self._save_builder_state(state)
+            await self._send_builder_prompt(
+                user_id,
+                chat_id,
+                state,
+                prefix="Дата и время уже прошли. Укажите будущий момент.",
+            )
+            return
         if state.mode == BUILDER_MODE_CREATE:
             saved = self.organizer_service.create_event(
                 user_id,
@@ -1580,6 +1731,37 @@ class BotHandlers:
             created_at=self.now(),
         )
 
+    def _event_visible_to_users(self, event: Event) -> bool:
+        return self._event_start_is_future(event.starts_at)
+
+    def _event_start_is_future(self, starts_at: datetime) -> bool:
+        return starts_at > self.now()
+
+    async def _send_event_unavailable_for_user(
+        self,
+        user_id: int,
+        chat_id: int | None,
+    ) -> None:
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=(
+                "Мероприятие уже началось или завершилось. "
+                "Откройте каталог и выберите ближайшее мероприятие."
+            ),
+            attachments=inline_keyboard(
+                [
+                    [callback_button("📚 Каталог", Payload("catalog"))],
+                    [self._main_menu_button()],
+                ]
+            ),
+        )
+
+    def _days_until_event_cleanup(self, event: Event) -> int:
+        expires_at = event.starts_at + timedelta(days=ORGANIZER_EVENT_RETENTION_DAYS)
+        remaining_seconds = (expires_at - self.now()).total_seconds()
+        return max(ceil(remaining_seconds / 86400), 0)
+
     def _event_public_text(
         self,
         event: Event,
@@ -1593,7 +1775,7 @@ class BotHandlers:
             f"ℹ️ {event.title}{dev_line}\n\n"
             f"{event.description}\n\n"
             f"📅 {self._format_datetime(event.starts_at)}\n"
-            f"⏱ {event.duration_minutes} мин. · {self._format_event_format(event)}\n"
+            f"🕒 {event.duration_minutes} мин. · {self._format_event_format(event)}\n"
             f"📌 Требования: {event.requirements}\n"
             f"📍 Адрес/ссылка: {event.location_or_url}\n"
             f"✅ Свободных мест: {free_places}"
@@ -1706,6 +1888,8 @@ class BotHandlers:
             return "После начала мероприятия отмена недоступна."
         if isinstance(exc, AccessDeniedError):
             return "У вас нет доступа к этому действию."
+        if isinstance(exc, EventStartInPastError):
+            return "Дата и время мероприятия уже прошли."
         return str(exc)
 
     @staticmethod

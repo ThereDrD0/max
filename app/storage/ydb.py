@@ -515,6 +515,20 @@ class YdbStorage:
             self._attach_event_image(event)
         return events
 
+    def delete_expired_events(self, *, expired_before: datetime) -> int:
+        rows = self._query(
+            """
+            DECLARE $expired_before AS Timestamp;
+            SELECT id FROM events
+            WHERE starts_at <= $expired_before;
+            """,
+            {"$expired_before": _timestamp(expired_before)},
+        )
+        event_ids = [int(row["id"]) for row in rows]
+        for event_id in event_ids:
+            self._delete_event_cascade(event_id)
+        return len(event_ids)
+
     def available_places(self, event_id: int, slot_id: int | None) -> int:
         event = self._require_event(event_id)
         if event.slots:
@@ -1355,6 +1369,88 @@ class YdbStorage:
         event.image_token = str(token) if token else None
         event.image_url = str(url) if url else None
         return event
+
+    def _delete_event_cascade(self, event_id: int) -> None:
+        registration_rows = self._query(
+            """
+            DECLARE $event_id AS Int64;
+            SELECT id, code, user_id FROM registrations
+            WHERE event_id = $event_id;
+            """,
+            {"$event_id": _int(event_id)},
+        )
+        for row in registration_rows:
+            registration_id = int(row["id"])
+            code = str(row["code"])
+            user_id = int(row["user_id"])
+            self._execute(
+                """
+                DECLARE $registration_id AS Int64;
+                DELETE FROM notification_outbox WHERE registration_id = $registration_id;
+                """,
+                {"$registration_id": _int(registration_id)},
+            )
+            self._execute(
+                """
+                DECLARE $code AS Utf8;
+                DELETE FROM registration_codes WHERE code = $code;
+                """,
+                {"$code": _utf8(code)},
+            )
+            self._execute(
+                """
+                DECLARE $active_key AS Utf8;
+                DELETE FROM active_registration_keys WHERE active_key = $active_key;
+                """,
+                {"$active_key": _utf8(self._active_key(user_id, event_id))},
+            )
+            self._execute(
+                """
+                DECLARE $entity_type AS Utf8;
+                DECLARE $entity_id AS Utf8;
+                DELETE FROM audit_log
+                WHERE entity_type = $entity_type AND entity_id = $entity_id;
+                """,
+                {
+                    "$entity_type": _utf8("registration"),
+                    "$entity_id": _utf8(str(registration_id)),
+                },
+            )
+
+        delete_queries = [
+            "DELETE FROM notification_outbox WHERE event_id = $event_id;",
+            "DELETE FROM registrations WHERE event_id = $event_id;",
+            "DELETE FROM event_slots WHERE event_id = $event_id;",
+            "DELETE FROM organizer_events WHERE event_id = $event_id;",
+            "DELETE FROM event_deeplinks WHERE event_id = $event_id;",
+            "DELETE FROM event_images WHERE event_id = $event_id;",
+            "DELETE FROM pending_event_images WHERE event_id = $event_id;",
+            "DELETE FROM organizer_states WHERE event_id = $event_id;",
+        ]
+        for query in delete_queries:
+            self._execute(
+                f"""
+                DECLARE $event_id AS Int64;
+                {query}
+                """,
+                {"$event_id": _int(event_id)},
+            )
+        self._execute(
+            """
+            DECLARE $entity_type AS Utf8;
+            DECLARE $entity_id AS Utf8;
+            DELETE FROM audit_log
+            WHERE entity_type = $entity_type AND entity_id = $entity_id;
+            """,
+            {"$entity_type": _utf8("event"), "$entity_id": _utf8(str(event_id))},
+        )
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DELETE FROM events WHERE id = $id;
+            """,
+            {"$id": _int(event_id)},
+        )
 
     def _attach_notification(self, item: NotificationOutbox) -> NotificationOutbox:
         if item.registration_id is not None:

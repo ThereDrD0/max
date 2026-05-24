@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from app.domain import InvalidNotificationKindError
+from app.domain import EventStartInPastError, InvalidNotificationKindError
 from app.enums import MANUAL_NOTIFICATION_KINDS, NotificationKind, RegistrationStatus
 from app.storage.base import Storage
 from app.storage.entities import Event, EventSlot, NotificationOutbox, Registration
@@ -56,6 +56,7 @@ class OrganizerService:
         event_id: int,
         starts_at: datetime,
     ) -> Event:
+        self._ensure_future_start(starts_at)
         previous = self.storage.get_event(event_id)
         previous_start = previous.starts_at if previous is not None else None
         event = self.storage.reschedule_event(
@@ -103,6 +104,7 @@ class OrganizerService:
         image_token: str | None,
         image_url: str | None,
     ) -> Event:
+        self._ensure_future_start(event.starts_at)
         return self.storage.create_organizer_event(
             actor_user_id,
             event,
@@ -121,6 +123,7 @@ class OrganizerService:
         image_token: str | None,
         image_url: str | None,
     ) -> Event:
+        self._ensure_future_start(event.starts_at)
         previous = self.storage.get_event(event.id)
         previous_start = previous.starts_at if previous is not None else None
         previous_location = previous.location_or_url if previous is not None else None
@@ -194,3 +197,7 @@ class OrganizerService:
         if kind == NotificationKind.JOIN_LINK_CHANGED:
             return f"Обновление по мероприятию «{title}»: обновлена ссылка на подключение."
         raise InvalidNotificationKindError("Неподдерживаемый тип уведомления")
+
+    def _ensure_future_start(self, starts_at: datetime) -> None:
+        if starts_at <= self.now():
+            raise EventStartInPastError("Дата и время мероприятия уже прошли")
