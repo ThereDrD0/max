@@ -82,7 +82,7 @@ REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
     "Ваша запись действует: вы участвуете в мероприятии."
 )
 
-CATALOG_PAGE_SIZE = 5
+CATALOG_PAGE_SIZE = 6
 ORGANIZER_BOOK_PAGE_SIZE = 6
 ORGANIZER_BOOK_BUTTON_TITLE_MAX_CHARS = 30
 CATALOG_SOON_COUNT = 3
@@ -633,7 +633,7 @@ class BotHandlers:
             )
             current_detail_row.append(
                 callback_button(
-                    f"ℹ️ Подробнее: {self._short_button_title(event.title)}",
+                    f"ℹ️ №{offset}. {self._short_button_title(event.title)}",
                     Payload("event_detail", event_id=event.id, value=str(page)),
                 )
             )
