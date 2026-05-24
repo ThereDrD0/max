@@ -56,6 +56,38 @@ def test_organizer_can_close_registration(storage, fixed_now):
     assert storage.get_event(event.id).registration_closed is True
 
 
+def test_organizer_can_close_event_and_enqueue_notifications_for_all_participants(
+    storage,
+    fixed_now,
+):
+    event, first = seed_event_with_registration(storage, fixed_now)
+    registration_service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "FIND02",
+    )
+    registration_service.upsert_user(102, "Борис")
+    registration_service.record_profile_consent(102, "hackathon-2026-05")
+    second = registration_service.create_registration(102, event.id, None)
+    registration_service.set_notifications_enabled(102, second.id, enabled=False)
+    service = OrganizerService(storage, now=lambda: fixed_now)
+
+    result = service.close_event(501, event.id)
+
+    assert result.event.registration_closed is True
+    assert result.notification_count == 2
+    assert storage.get_registration(first.id).status == RegistrationStatus.CANCELED_BY_ORGANIZER
+    assert storage.get_registration(second.id).status == RegistrationStatus.CANCELED_BY_ORGANIZER
+    notifications = [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.EVENT_CLOSED
+    ]
+    assert [item.user_id for item in notifications] == [101, 102]
+    assert all(item.registration_id is None for item in notifications)
+    assert all("Мероприятие «Экскурсия по кампусу» закрыто" in item.message_text for item in notifications)
+
+
 def test_manual_notifications_are_limited_to_event_templates(
     storage, fixed_now
 ):
@@ -81,6 +113,12 @@ def test_manual_notifications_are_limited_to_event_templates(
             501,
             event.id,
             NotificationKind.REMINDER_1H,
+        )
+    with pytest.raises(InvalidNotificationKindError):
+        service.enqueue_manual_notification(
+            501,
+            event.id,
+            NotificationKind.EVENT_CLOSED,
         )
 
 

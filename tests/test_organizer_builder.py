@@ -63,10 +63,21 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
     assert "✅ Свободных мест: 2 из 2" in message["text"]
     assert "↩️ Отмена:" not in message["text"]
     button_texts = _button_texts(message)
+    rows = _keyboard_rows(message)
+    assert [button["text"] for button in rows[0]] == [
+        "🗓 Изменить дату или время",
+        "📍 Изменить место",
+    ]
     assert "🗓 Изменить дату или время" in button_texts
     assert "📍 Изменить место" in button_texts
     assert "📝 Заполнить информацию заново" in button_texts
+    assert any(
+        [button["text"] for button in row]
+        == ["🚫 Закрыть регистрацию", "🛑 Закрыть мероприятие"]
+        for row in rows
+    )
     assert "🚫 Закрыть регистрацию" in button_texts
+    assert "🛑 Закрыть мероприятие" in button_texts
     assert "🔗 Поделиться" in button_texts
     assert "⬅️ Назад" in button_texts
     assert "Картинка" not in button_texts
@@ -123,6 +134,62 @@ async def test_organizer_close_registration_requires_confirmation_and_hides_acti
     menu = fake_bot.sent[-1]
     assert "Регистрация новых участников закрыта." in menu["text"]
     assert "🚫 Закрыть регистрацию" not in _button_texts(menu)
+
+
+async def test_organizer_close_event_requires_confirmation_and_notifies_participants(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="День открытых дверей")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "CLOSE1",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_event_close_confirm", event_id=event.id).pack(),
+    )
+
+    confirmation = fake_bot.sent[-1]
+    assert "Закрыть мероприятие «День открытых дверей»?" in confirmation["text"]
+    assert "все участники получат уведомление" in confirmation["text"]
+    assert "🛑 Закрыть мероприятие" in _button_texts(confirmation)
+    assert "⬅️ Назад" in _button_texts(confirmation)
+    assert storage.get_registration(registration.id).status.value == "confirmed"
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_event_close", event_id=event.id).pack(),
+    )
+
+    closed = fake_bot.sent[-1]
+    assert "Мероприятие «День открытых дверей» закрыто." in closed["text"]
+    assert "Уведомления поставлены в очередь для 1 участников." in closed["text"]
+    assert storage.get_registration(registration.id).status.value == "canceled_by_organizer"
+    assert storage.get_event(event.id).registration_closed is True
+    event_notifications = [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.EVENT_CLOSED
+    ]
+    assert len(event_notifications) == 1
+    assert event_notifications[0].user_id == 101
+    assert event_notifications[0].registration_id is None
+    assert "Мероприятие «День открытых дверей» закрыто" in event_notifications[0].message_text
 
 
 async def test_organizer_event_menu_shows_slot_capacity_as_current_of_maximum(
@@ -678,6 +745,13 @@ def _buttons(message: dict) -> list[dict]:
         for row in attachment["payload"]["buttons"]
         for button in row
     ]
+
+
+def _keyboard_rows(message: dict) -> list[list[dict]]:
+    for attachment in message["attachments"]:
+        if isinstance(attachment, dict) and attachment["type"] == "inline_keyboard":
+            return attachment["payload"]["buttons"]
+    raise AssertionError("inline_keyboard attachment not found")
 
 
 def _has_local_organizer_menu_image(message: dict) -> bool:

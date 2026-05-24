@@ -364,6 +364,8 @@ class BotHandlers:
             await self._send_organizer_reminder_entry(user_id, chat_id, data.event_id)
         elif data.action == "org_close_confirm" and data.event_id is not None:
             await self._send_organizer_close_confirmation(user_id, chat_id, data.event_id)
+        elif data.action == "org_event_close_confirm" and data.event_id is not None:
+            await self._send_organizer_event_close_confirmation(user_id, chat_id, data.event_id)
         elif data.action == "org_remind_all" and data.event_id is not None:
             await self._start_manual_reminder_text(
                 user_id,
@@ -421,6 +423,28 @@ class BotHandlers:
                             callback_button(
                                 "ℹ️ Мероприятие",
                                 Payload("org_event", event_id=event.id),
+                            )
+                        ],
+                        [callback_button("⬅️ Назад", Payload("org_menu"))],
+                    ]
+                ),
+            )
+        elif data.action == "org_event_close" and data.event_id is not None:
+            result = self.organizer_service.close_event(user_id, data.event_id)
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=(
+                    f"Мероприятие «{result.event.title}» закрыто.\n\n"
+                    "Все активные записи отменены. "
+                    f"Уведомления поставлены в очередь для {result.notification_count} участников."
+                ),
+                attachments=inline_keyboard(
+                    [
+                        [
+                            callback_button(
+                                "ℹ️ Мероприятие",
+                                Payload("org_event", event_id=result.event.id),
                             )
                         ],
                         [callback_button("⬅️ Назад", Payload("org_menu"))],
@@ -1112,9 +1136,7 @@ class BotHandlers:
                 callback_button(
                     "🗓 Изменить дату или время",
                     Payload("org_datetime", event_id=event_id),
-                )
-            ],
-            [
+                ),
                 callback_button(
                     "📍 Изменить место",
                     Payload("org_place", event_id=event_id),
@@ -1127,16 +1149,25 @@ class BotHandlers:
                 )
             ],
         ]
+        close_buttons = []
         if self._event_visible_to_users(event) and not event.registration_closed:
-            rows.append(
-                [
-                    callback_button(
-                        "🚫 Закрыть регистрацию",
-                        Payload("org_close_confirm", event_id=event_id),
-                        intent="negative",
-                    )
-                ]
+            close_buttons.append(
+                callback_button(
+                    "🚫 Закрыть регистрацию",
+                    Payload("org_close_confirm", event_id=event_id),
+                    intent="negative",
+                )
             )
+        if self._event_visible_to_users(event):
+            close_buttons.append(
+                callback_button(
+                    "🛑 Закрыть мероприятие",
+                    Payload("org_event_close_confirm", event_id=event_id),
+                    intent="negative",
+                )
+            )
+        if close_buttons:
+            rows.append(close_buttons)
         rows.append(
             [
                 callback_button(
@@ -1211,6 +1242,35 @@ class BotHandlers:
                         callback_button(
                             "🚫 Закрыть регистрацию",
                             Payload("org_close", event_id=event.id),
+                            intent="negative",
+                        )
+                    ],
+                    [callback_button("⬅️ Назад", Payload("org_event", event_id=event.id))],
+                ]
+            ),
+        )
+
+    async def _send_organizer_event_close_confirmation(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        event_id: int,
+    ) -> None:
+        event = self._organizer_event_for_actor(user_id, event_id)
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=(
+                f"Закрыть мероприятие «{event.title}»?\n\n"
+                "Мероприятие будет закрыто, все активные записи будут отменены, "
+                "и все участники получат уведомление."
+            ),
+            attachments=inline_keyboard(
+                [
+                    [
+                        callback_button(
+                            "🛑 Закрыть мероприятие",
+                            Payload("org_event_close", event_id=event.id),
                             intent="negative",
                         )
                     ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.domain import (
@@ -17,6 +18,12 @@ from app.enums import (
 from app.services.reminders import render_automatic_reminder, render_manual_reminder
 from app.storage.base import Storage
 from app.storage.entities import Event, EventSlot, NotificationOutbox, Registration
+
+
+@dataclass(frozen=True, slots=True)
+class EventCloseResult:
+    event: Event
+    notification_count: int
 
 
 class OrganizerService:
@@ -59,6 +66,35 @@ class OrganizerService:
 
     def close_registration(self, actor_user_id: int, event_id: int) -> Event:
         return self.storage.close_registration(actor_user_id, event_id)
+
+    def close_event(self, actor_user_id: int, event_id: int) -> EventCloseResult:
+        event = self.storage.close_registration(actor_user_id, event_id)
+        current = self.now()
+        registrations = self.storage.get_event_registrations(actor_user_id, event_id)
+        notification_count = 0
+        for registration in registrations:
+            if registration.status not in ACTIVE_REGISTRATION_STATUSES:
+                continue
+            self.storage.add_notification(
+                NotificationOutbox(
+                    id=0,
+                    event_id=event_id,
+                    registration_id=None,
+                    user_id=registration.user_id,
+                    kind=NotificationKind.EVENT_CLOSED,
+                    message_text=self._render_event_closed_notification(event),
+                    send_after=current,
+                    created_at=current,
+                )
+            )
+            notification_count += 1
+            self.storage.change_status(
+                actor_user_id,
+                registration.id,
+                RegistrationStatus.CANCELED_BY_ORGANIZER,
+                now=current,
+            )
+        return EventCloseResult(event=event, notification_count=notification_count)
 
     def reschedule_event(
         self,
@@ -261,6 +297,14 @@ class OrganizerService:
         if kind == NotificationKind.JOIN_LINK_CHANGED:
             return f"Обновление по мероприятию «{title}»: обновлена ссылка на подключение."
         raise InvalidNotificationKindError("Неподдерживаемый тип уведомления")
+
+    @staticmethod
+    def _render_event_closed_notification(event: Event | None) -> str:
+        title = event.title if event else "мероприятие"
+        return (
+            f"Мероприятие «{title}» закрыто Организатором.\n\n"
+            "Ваша запись отменена. Приходить на это мероприятие не нужно."
+        )
 
     def _ensure_future_start(self, starts_at: datetime) -> None:
         if starts_at <= self.now():
