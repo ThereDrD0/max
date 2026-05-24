@@ -7,7 +7,7 @@ import pytest
 from app.bot.handlers import BotHandlers
 from app.bot.payloads import Payload
 from app.domain import BotDomainError
-from app.enums import EventFormat, LateCancelPolicy, NotificationKind
+from app.enums import EventFormat, LateCancelPolicy, NotificationKind, RegistrationStatus
 from app.storage.entities import Event, EventSlot
 from tests.conftest import create_event
 
@@ -81,6 +81,7 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
         == ["🔔 Напомнить участникам", "🔗 Поделиться"]
         for row in rows
     )
+    assert "👥 Участники" in button_texts
     assert "🚫 Закрыть регистрацию" in button_texts
     assert "🛑 Закрыть мероприятие" in button_texts
     assert "🔗 Поделиться" in button_texts
@@ -421,6 +422,174 @@ async def test_organizer_reminder_auto_button_uses_default_text(
     assert "🔔 Напоминание о мероприятии" in manual_items[0].message_text
     assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in manual_items[0].message_text
     assert "🎫 Код записи: AUTO01" in manual_items[0].message_text
+
+
+async def test_organizer_participants_book_sorts_statuses_and_shows_action_buttons(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Пробное занятие", capacity=10)
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=iter(["CONF2", "CONF1", "ATT01", "CAN01", "LATE1"]).__next__,
+    )
+    registrations = []
+    for user_id, name in [
+        (101, "Яна"),
+        (102, "Анна"),
+        (103, "Петр"),
+        (104, "Борис"),
+        (105, "Сергей"),
+    ]:
+        handlers.registration_service.upsert_user(user_id, name)
+        handlers.registration_service.record_profile_consent(user_id, "docs")
+        registrations.append(
+            handlers.registration_service.create_registration(user_id, event.id, None)
+        )
+    handlers.organizer_service.mark_attended(501, registrations[2].id)
+    handlers.registration_service.cancel_registration(104, registrations[3].id)
+    handlers.organizer_service.change_status(
+        501,
+        registrations[4].id,
+        RegistrationStatus.LATE_CANCELED,
+    )
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_participants", event_id=event.id).pack(),
+    )
+
+    message = fake_bot.sent[-1]
+    assert "🧑‍💼👥 Участники мероприятия" in message["text"]
+    assert "Нажмите на имя записанного участника" in message["text"]
+    assert "Страница 1/1" in message["text"]
+    assert "1. Анна - CONF1 - Записан" in message["text"]
+    assert "2. Яна - CONF2 - Записан" in message["text"]
+    assert "3. Петр - ATT01 - Пришел" in message["text"]
+    assert "4. Борис - CAN01 - Запись отменена" in message["text"]
+    assert "5. Сергей - LATE1 - Запись отменена" in message["text"]
+    assert message["text"].index("1. Анна") < message["text"].index("2. Яна")
+    assert message["text"].index("2. Яна") < message["text"].index("3. Петр")
+    button_texts = _button_texts(message)
+    assert "✅ Анна пришел" in button_texts
+    assert "✅ Яна пришел" in button_texts
+    assert "✅ Петр пришел" not in button_texts
+    assert "✅ Борис пришел" not in button_texts
+    assert "✅ Сергей пришел" not in button_texts
+    assert "⬅️ К мероприятию" in button_texts
+    assert _has_local_participants_menu_image(message)
+
+
+async def test_organizer_participants_book_paginates_eight_items(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Пробное занятие", capacity=12)
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=iter([f"CODE{i:02d}" for i in range(1, 10)]).__next__,
+    )
+    for index in range(1, 10):
+        user_id = 100 + index
+        handlers.registration_service.upsert_user(user_id, f"Участник {index:02d}")
+        handlers.registration_service.record_profile_consent(user_id, "docs")
+        handlers.registration_service.create_registration(user_id, event.id, None)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_participants", event_id=event.id).pack(),
+    )
+
+    first_page = fake_bot.sent[-1]
+    assert "Страница 1/2" in first_page["text"]
+    assert "8. Участник 08 - CODE08 - Записан" in first_page["text"]
+    assert "9. Участник 09 - CODE09 - Записан" not in first_page["text"]
+    first_buttons = {button["text"]: button for button in _buttons(first_page)}
+    assert first_buttons["➡️ Далее"]["payload"] == Payload(
+        "org_participants",
+        event_id=event.id,
+        value="1",
+    ).pack()
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_participants", event_id=event.id, value="1").pack(),
+    )
+
+    second_page = fake_bot.sent[-1]
+    assert "Страница 2/2" in second_page["text"]
+    assert "9. Участник 09 - CODE09 - Записан" in second_page["text"]
+    assert "1. Участник 01 - CODE01 - Записан" not in second_page["text"]
+    second_buttons = {button["text"]: button for button in _buttons(second_page)}
+    assert second_buttons["⬅️ Назад"]["payload"] == Payload(
+        "org_participants",
+        event_id=event.id,
+        value="0",
+    ).pack()
+
+
+async def test_organizer_participants_button_marks_attended_and_refreshes_page(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Пробное занятие")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "ATND01",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload(
+            "org_participant_attended",
+            event_id=event.id,
+            registration_id=registration.id,
+            value="0",
+        ).pack(),
+    )
+
+    message = fake_bot.sent[-1]
+    assert storage.get_registration(registration.id).status == RegistrationStatus.ATTENDED
+    assert "1. Анна - ATND01 - Пришел" in message["text"]
+    assert "✅ Анна пришел" not in _button_texts(message)
+    notifications = [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.ATTENDANCE_MARKED
+    ]
+    assert len(notifications) == 1
+    assert notifications[0].user_id == 101
+    assert notifications[0].registration_id == registration.id
+    assert "Организатор отметил, что вы пришли" in notifications[0].message_text
 
 
 async def test_builder_creates_event_with_slots_and_image(
@@ -764,6 +933,15 @@ def _has_local_organizer_menu_image(message: dict) -> bool:
     return any(
         getattr(attachment, "path", "").replace("\\", "/").endswith(
             "app/assets/organizer-menu.png"
+        )
+        for attachment in message["attachments"]
+    )
+
+
+def _has_local_participants_menu_image(message: dict) -> bool:
+    return any(
+        getattr(attachment, "path", "").replace("\\", "/").endswith(
+            "app/assets/participants-menu.png"
         )
         for attachment in message["attachments"]
     )

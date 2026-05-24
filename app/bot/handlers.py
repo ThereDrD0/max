@@ -84,11 +84,16 @@ REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
 
 CATALOG_PAGE_SIZE = 6
 ORGANIZER_BOOK_PAGE_SIZE = 6
+PARTICIPANTS_BOOK_PAGE_SIZE = 8
 ORGANIZER_BOOK_BUTTON_TITLE_MAX_CHARS = 30
+PARTICIPANT_BUTTON_NAME_MAX_CHARS = 24
 CATALOG_SOON_COUNT = 3
 MAIN_MENU_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "main-menu.png"
 ORGANIZER_MENU_IMAGE_PATH = (
     Path(__file__).resolve().parents[1] / "assets" / "organizer-menu.png"
+)
+PARTICIPANTS_MENU_IMAGE_PATH = (
+    Path(__file__).resolve().parents[1] / "assets" / "participants-menu.png"
 )
 _SEND_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 _SEND_LOCKS_GUARD = Lock()
@@ -328,6 +333,14 @@ class BotHandlers:
                 data.event_id,
                 page=self._payload_page(data),
             )
+        elif data.action == "org_participants" and data.event_id is not None:
+            self.storage.clear_organizer_state(user_id)
+            await self._send_organizer_participants(
+                user_id,
+                chat_id,
+                data.event_id,
+                page=self._payload_page(data),
+            )
         elif data.action == "org_create":
             await self._start_event_builder(user_id, chat_id, mode=BUILDER_MODE_CREATE)
         elif data.action == "org_rebuild" and data.event_id is not None:
@@ -466,7 +479,7 @@ class BotHandlers:
                 text=f"Уведомление поставлено в очередь для {len(created)} участников.",
             )
         elif data.action == "org_attended" and data.registration_id is not None:
-            registration = self.organizer_service.mark_attended(
+            registration = self.organizer_service.mark_attended_with_notification(
                 user_id,
                 data.registration_id,
             )
@@ -474,6 +487,21 @@ class BotHandlers:
                 user_id=user_id,
                 chat_id=chat_id,
                 text=f"Посещение отмечено для записи {registration.code}.",
+            )
+        elif (
+            data.action == "org_participant_attended"
+            and data.event_id is not None
+            and data.registration_id is not None
+        ):
+            registration = self.organizer_service.mark_attended_with_notification(
+                user_id,
+                data.registration_id,
+            )
+            await self._send_organizer_participants(
+                user_id,
+                chat_id,
+                registration.event_id,
+                page=self._payload_page(data),
             )
         else:
             await self._send(
@@ -1174,6 +1202,14 @@ class BotHandlers:
             ],
             reminder_buttons,
         ]
+        rows.append(
+            [
+                callback_button(
+                    "👥 Участники",
+                    Payload("org_participants", event_id=event_id),
+                )
+            ]
+        )
         close_buttons = []
         if self._event_visible_to_users(event) and not event.registration_closed:
             close_buttons.append(
@@ -1223,6 +1259,113 @@ class BotHandlers:
             chat_id=chat_id,
             text=f"🧑‍💼 МЕНЮ ОРГАНИЗАТОРА\n\n{public_text}",
             attachments=self._event_detail_attachments(event, rows),
+        )
+
+    async def _send_organizer_participants(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        event_id: int,
+        *,
+        page: int = 0,
+    ) -> None:
+        event = self._organizer_event_for_actor(user_id, event_id)
+        registrations = self._sorted_participant_registrations(
+            self.organizer_service.get_event_registrations(user_id, event_id)
+        )
+        total_pages = max(ceil(len(registrations) / PARTICIPANTS_BOOK_PAGE_SIZE), 1)
+        page = max(min(page, total_pages - 1), 0)
+        first_offset = 1 + page * PARTICIPANTS_BOOK_PAGE_SIZE
+        page_registrations = registrations[
+            page * PARTICIPANTS_BOOK_PAGE_SIZE : (page + 1) * PARTICIPANTS_BOOK_PAGE_SIZE
+        ]
+        lines = [
+            "🧑‍💼👥 Участники мероприятия",
+            f"Страница {page + 1}/{total_pages}",
+            "",
+            f"Мероприятие: {event.title}",
+            (
+                "Здесь видны записи на мероприятие: имя участника, код и текущий "
+                "статус."
+            ),
+            "Нажмите на имя записанного участника, чтобы отметить, что он пришел.",
+        ]
+        if page_registrations:
+            lines.append("")
+            for offset, registration in enumerate(page_registrations, start=first_offset):
+                lines.append(
+                    f"{offset}. {self._participant_name(registration)} - "
+                    f"{registration.code} - "
+                    f"{self._format_participant_status(registration.status)}"
+                )
+        else:
+            lines.append("\nПока по этому мероприятию нет записей.")
+
+        rows: list[list[dict]] = []
+        current_row: list[dict] = []
+        for registration in page_registrations:
+            if registration.status != RegistrationStatus.CONFIRMED:
+                continue
+            button_name = self._short_button_title(
+                self._participant_name(registration),
+                max_chars=PARTICIPANT_BUTTON_NAME_MAX_CHARS,
+            )
+            current_row.append(
+                callback_button(
+                    f"✅ {button_name} пришел",
+                    Payload(
+                        "org_participant_attended",
+                        event_id=event.id,
+                        registration_id=registration.id,
+                        value=str(page),
+                    ),
+                    intent="positive",
+                )
+            )
+            if len(current_row) == 2:
+                rows.append(current_row)
+                current_row = []
+        if current_row:
+            rows.append(current_row)
+
+        previous_page = (page - 1) % total_pages
+        next_page = (page + 1) % total_pages
+        rows.append(
+            [
+                callback_button(
+                    "⬅️ Назад",
+                    Payload(
+                        "org_participants",
+                        event_id=event.id,
+                        value=str(previous_page),
+                    ),
+                ),
+                callback_button(
+                    "➡️ Далее",
+                    Payload(
+                        "org_participants",
+                        event_id=event.id,
+                        value=str(next_page),
+                    ),
+                ),
+            ]
+        )
+        rows.append(
+            [
+                callback_button(
+                    "⬅️ К мероприятию",
+                    Payload("org_event", event_id=event.id),
+                )
+            ]
+        )
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text="\n".join(lines),
+            attachments=[
+                local_image_attachment(PARTICIPANTS_MENU_IMAGE_PATH),
+                *inline_keyboard(rows),
+            ],
         )
 
     async def _send_organizer_close_confirmation(
@@ -2255,6 +2398,38 @@ class BotHandlers:
             RegistrationStatus.ATTENDED: "Пришёл",
         }
         return mapping[status]
+
+    @staticmethod
+    def _format_participant_status(status: RegistrationStatus) -> str:
+        if status == RegistrationStatus.CONFIRMED:
+            return "Записан"
+        if status == RegistrationStatus.ATTENDED:
+            return "Пришел"
+        return "Запись отменена"
+
+    @classmethod
+    def _sorted_participant_registrations(
+        cls,
+        registrations: list[Registration],
+    ) -> list[Registration]:
+        status_order = {
+            RegistrationStatus.CONFIRMED: 0,
+            RegistrationStatus.ATTENDED: 1,
+        }
+        return sorted(
+            registrations,
+            key=lambda item: (
+                status_order.get(item.status, 2),
+                cls._participant_name(item).casefold(),
+                item.code,
+            ),
+        )
+
+    @staticmethod
+    def _participant_name(registration: Registration) -> str:
+        if registration.user is not None and registration.user.display_name.strip():
+            return registration.user.display_name.strip()
+        return f"Участник {registration.user_id}"
 
     @classmethod
     def _format_status_for_user(cls, status: RegistrationStatus) -> str:

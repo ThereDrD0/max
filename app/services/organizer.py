@@ -210,6 +210,40 @@ class OrganizerService:
             now=self.now(),
         )
 
+    def mark_attended_with_notification(
+        self,
+        actor_user_id: int,
+        registration_id: int,
+    ) -> Registration:
+        previous = self.storage.get_registration(registration_id)
+        previous_status = previous.status if previous is not None else None
+        current = self.now()
+        registration = self.storage.mark_attended(
+            actor_user_id,
+            registration_id,
+            now=current,
+        )
+        should_notify = (
+            previous_status == RegistrationStatus.CONFIRMED
+            and registration.notifications_enabled
+        )
+        if should_notify:
+            self.storage.add_notification(
+                NotificationOutbox(
+                    id=0,
+                    event_id=registration.event_id,
+                    registration_id=registration.id,
+                    user_id=registration.user_id,
+                    kind=NotificationKind.ATTENDANCE_MARKED,
+                    message_text=self._render_attendance_marked_notification(
+                        registration.event or self.storage.get_event(registration.event_id)
+                    ),
+                    send_after=current,
+                    created_at=current,
+                )
+            )
+        return registration
+
     def change_status(
         self,
         actor_user_id: int,
@@ -304,6 +338,14 @@ class OrganizerService:
         return (
             f"Мероприятие «{title}» закрыто Организатором.\n\n"
             "Ваша запись отменена. Приходить на это мероприятие не нужно."
+        )
+
+    @staticmethod
+    def _render_attendance_marked_notification(event: Event | None) -> str:
+        title = event.title if event else "мероприятие"
+        return (
+            f"Организатор отметил, что вы пришли на мероприятие «{title}».\n\n"
+            "Спасибо, что отметились. Хорошего участия!"
         )
 
     def _ensure_future_start(self, starts_at: datetime) -> None:

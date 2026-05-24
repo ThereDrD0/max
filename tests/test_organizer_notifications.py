@@ -46,6 +46,50 @@ def test_organizer_searches_registration_by_code_and_updates_status(
     assert found.status == RegistrationStatus.ATTENDED
 
 
+def test_organizer_mark_attended_enqueues_notification_when_enabled(
+    storage,
+    fixed_now,
+):
+    event, registration = seed_event_with_registration(storage, fixed_now)
+    service = OrganizerService(storage, now=lambda: fixed_now)
+
+    updated = service.mark_attended_with_notification(501, registration.id)
+
+    assert updated.status == RegistrationStatus.ATTENDED
+    notifications = [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.ATTENDANCE_MARKED
+    ]
+    assert len(notifications) == 1
+    assert notifications[0].event_id == event.id
+    assert notifications[0].registration_id == registration.id
+    assert notifications[0].user_id == registration.user_id
+    assert "Организатор отметил, что вы пришли" in notifications[0].message_text
+
+
+def test_organizer_mark_attended_skips_notification_when_disabled(
+    storage,
+    fixed_now,
+):
+    _, registration = seed_event_with_registration(storage, fixed_now)
+    registration_service = RegistrationService(storage, now=lambda: fixed_now)
+    registration_service.set_notifications_enabled(
+        registration.user_id,
+        registration.id,
+        enabled=False,
+    )
+    service = OrganizerService(storage, now=lambda: fixed_now)
+
+    service.mark_attended_with_notification(501, registration.id)
+
+    assert [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.ATTENDANCE_MARKED
+    ] == []
+
+
 def test_organizer_can_close_registration(storage, fixed_now):
     event, _ = seed_event_with_registration(storage, fixed_now)
     service = OrganizerService(storage, now=lambda: fixed_now)
