@@ -77,6 +77,10 @@ ORGANIZER_COMMAND_LINES = (
     "/organizer — открыть меню организатора",
     "/find КОД — найти запись по коду, доступно организаторам",
 )
+REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
+    "Регистрация новых участников закрыта. "
+    "Ваша запись действует: вы участвуете в мероприятии."
+)
 
 CATALOG_PAGE_SIZE = 5
 CATALOG_SOON_COUNT = 3
@@ -358,6 +362,8 @@ class BotHandlers:
             )
         elif data.action == "org_remind" and data.event_id is not None:
             await self._send_organizer_reminder_entry(user_id, chat_id, data.event_id)
+        elif data.action == "org_close_confirm" and data.event_id is not None:
+            await self._send_organizer_close_confirmation(user_id, chat_id, data.event_id)
         elif data.action == "org_remind_all" and data.event_id is not None:
             await self._start_manual_reminder_text(
                 user_id,
@@ -403,7 +409,23 @@ class BotHandlers:
             await self._send(
                 user_id=user_id,
                 chat_id=chat_id,
-                text=f"Регистрация на «{event.title}» закрыта.",
+                text=(
+                    f"Регистрация на «{event.title}» закрыта.\n\n"
+                    "Новые участники больше не увидят мероприятие в каталоге "
+                    "и не смогут записаться. Текущие записи остаются действующими: "
+                    "участники остаются на мероприятии и получат уведомления."
+                ),
+                attachments=inline_keyboard(
+                    [
+                        [
+                            callback_button(
+                                "ℹ️ Мероприятие",
+                                Payload("org_event", event_id=event.id),
+                            )
+                        ],
+                        [callback_button("⬅️ Назад", Payload("org_menu"))],
+                    ]
+                ),
             )
         elif data.action == "org_notify" and data.event_id is not None and data.value:
             created = self.organizer_service.enqueue_manual_notification(
@@ -661,6 +683,8 @@ class BotHandlers:
                     f"Код записи: {active_registration.code}",
                 ]
             )
+            if event.registration_closed:
+                status_lines.append(REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT)
             rows.append(
                 [
                     callback_button(
@@ -769,6 +793,8 @@ class BotHandlers:
         event = self.storage.get_event(event_id)
         if event is None:
             raise RegistrationClosedError("Мероприятие недоступно")
+        if event.registration_closed or not self._event_visible_to_users(event):
+            raise RegistrationClosedError("Регистрация на мероприятие закрыта")
         slot_text = "без отдельного слота"
         if slot_id is not None:
             slot = next((item for item in event.slots if item.id == slot_id), None)
@@ -857,10 +883,19 @@ class BotHandlers:
         lines = ["🎫 Ваши записи:"]
         rows = []
         for index, registration in enumerate(registrations, start=1):
+            closed_registration_text = (
+                f"\n{REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT}"
+                if (
+                    registration.status in ACTIVE_REGISTRATION_STATUSES
+                    and registration.event.registration_closed
+                )
+                else ""
+            )
             lines.append(
                 f"\n{registration.event.title}\n"
                 f"Код: {registration.code}\n"
                 f"Статус: {self._format_status_for_user(registration.status)}"
+                f"{closed_registration_text}"
             )
             is_active = registration.status in ACTIVE_REGISTRATION_STATUSES
             prefix = "✅" if is_active else "⚪"
@@ -1091,13 +1126,25 @@ class BotHandlers:
                     Payload("org_remind", event_id=event_id),
                 )
             ],
+        ]
+        if self._event_visible_to_users(event) and not event.registration_closed:
+            rows.append(
+                [
+                    callback_button(
+                        "🚫 Закрыть регистрацию",
+                        Payload("org_close_confirm", event_id=event_id),
+                        intent="negative",
+                    )
+                ]
+            )
+        rows.append(
             [
                 callback_button(
                     "📝 Заполнить информацию заново",
                     Payload("org_rebuild", event_id=event_id),
                 )
-            ],
-        ]
+            ]
+        )
         deeplink = await self._event_deeplink(event) if self._event_visible_to_users(event) else None
         if deeplink:
             rows.append([clipboard_button("🔗 Поделиться", deeplink)])
@@ -1110,6 +1157,8 @@ class BotHandlers:
                 "\n\nМероприятие уже началось или завершилось. "
                 f"В меню организатора оно будет ещё {self._days_until_event_cleanup(event)} дн."
             )
+        elif event.registration_closed:
+            status_text = "\n\nРегистрация новых участников закрыта."
         public_text = self._event_public_text(
             event,
             free_places=free,
@@ -1121,6 +1170,53 @@ class BotHandlers:
             chat_id=chat_id,
             text=f"🧑‍💼 МЕНЮ ОРГАНИЗАТОРА\n\n{public_text}",
             attachments=self._event_detail_attachments(event, rows),
+        )
+
+    async def _send_organizer_close_confirmation(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        event_id: int,
+    ) -> None:
+        event = self._organizer_event_for_actor(user_id, event_id)
+        if event.registration_closed:
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=f"Регистрация на «{event.title}» уже закрыта.",
+                attachments=inline_keyboard(
+                    [
+                        [
+                            callback_button(
+                                "ℹ️ Мероприятие",
+                                Payload("org_event", event_id=event.id),
+                            )
+                        ]
+                    ]
+                ),
+            )
+            return
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=(
+                f"Закрыть регистрацию на мероприятие «{event.title}»?\n\n"
+                "Новые участники больше не увидят мероприятие в каталоге "
+                "и не смогут записаться. Текущие записи останутся действующими: "
+                "участники останутся на мероприятии и получат уведомления."
+            ),
+            attachments=inline_keyboard(
+                [
+                    [
+                        callback_button(
+                            "🚫 Закрыть регистрацию",
+                            Payload("org_close", event_id=event.id),
+                            intent="negative",
+                        )
+                    ],
+                    [callback_button("⬅️ Назад", Payload("org_event", event_id=event.id))],
+                ]
+            ),
         )
 
     async def _send_organizer_reminder_entry(

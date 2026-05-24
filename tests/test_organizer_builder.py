@@ -66,10 +66,63 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
     assert "🗓 Изменить дату или время" in button_texts
     assert "📍 Изменить место" in button_texts
     assert "📝 Заполнить информацию заново" in button_texts
+    assert "🚫 Закрыть регистрацию" in button_texts
     assert "🔗 Поделиться" in button_texts
     assert "⬅️ Назад" in button_texts
     assert "Картинка" not in button_texts
-    assert "Закрыть регистрацию" not in button_texts
+
+
+async def test_organizer_close_registration_requires_confirmation_and_hides_action(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="День открытых дверей")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_close_confirm", event_id=event.id).pack(),
+    )
+
+    confirmation = fake_bot.sent[-1]
+    assert (
+        "Закрыть регистрацию на мероприятие «День открытых дверей»?"
+        in confirmation["text"]
+    )
+    assert "Новые участники больше не увидят мероприятие в каталоге" in confirmation["text"]
+    assert "Текущие записи останутся действующими" in confirmation["text"]
+    assert "🚫 Закрыть регистрацию" in _button_texts(confirmation)
+    assert "⬅️ Назад" in _button_texts(confirmation)
+    assert storage.get_event(event.id).registration_closed is False
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_close", event_id=event.id).pack(),
+    )
+
+    closed = fake_bot.sent[-1]
+    assert "Регистрация на «День открытых дверей» закрыта." in closed["text"]
+    assert "Новые участники больше не увидят мероприятие в каталоге" in closed["text"]
+    assert "Текущие записи остаются действующими" in closed["text"]
+    assert storage.get_event(event.id).registration_closed is True
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_event", event_id=event.id).pack(),
+    )
+
+    menu = fake_bot.sent[-1]
+    assert "Регистрация новых участников закрыта." in menu["text"]
+    assert "🚫 Закрыть регистрацию" not in _button_texts(menu)
 
 
 async def test_organizer_event_menu_shows_slot_capacity_as_current_of_maximum(

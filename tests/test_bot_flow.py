@@ -670,6 +670,69 @@ async def test_my_registrations_links_to_event_detail_and_marks_status_visually(
     assert not any(button["payload"].startswith("reg_cancel") for button in buttons)
 
 
+async def test_closed_registration_hides_catalog_but_keeps_user_record_visible(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    open_event = create_event(storage, fixed_now, title="Открытая экскурсия")
+    closed_event = create_event(storage, fixed_now, title="Закрытая встреча")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, closed_event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "KEEP01",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    handlers.registration_service.create_registration(101, closed_event.id, None)
+    handlers.organizer_service.close_registration(501, closed_event.id)
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("catalog").pack(),
+    )
+
+    catalog = fake_bot.sent[-1]
+    assert "Открытая экскурсия" in catalog["text"]
+    assert "Закрытая встреча" not in catalog["text"]
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs").pack(),
+    )
+
+    records = fake_bot.sent[-1]
+    assert "Закрытая встреча" in records["text"]
+    assert "Код: KEEP01" in records["text"]
+    assert (
+        "Регистрация новых участников закрыта. "
+        "Ваша запись действует: вы участвуете в мероприятии."
+    ) in records["text"]
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("event_detail", event_id=closed_event.id).pack(),
+    )
+
+    detail = fake_bot.sent[-1]
+    assert "✅ ВЫ УЖЕ ЗАПИСАНЫ НА ЭТО МЕРОПРИЯТИЕ." in detail["text"]
+    assert (
+        "Регистрация новых участников закрыта. "
+        "Ваша запись действует: вы участвуете в мероприятии."
+    ) in detail["text"]
+    assert "📝 Записаться" not in _button_texts(detail)
+
+
 async def test_event_detail_cancel_requires_explicit_confirmation(
     storage, fake_bot, fixed_now
 ):
@@ -868,6 +931,43 @@ async def test_stale_booking_button_rechecks_event_start_time(
     )
 
     assert fake_bot.sent[-1]["text"] == "Регистрация закрыта."
+
+
+async def test_stale_booking_buttons_recheck_closed_registration(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Экскурсия", with_slots=True)
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "CLOSED",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    handlers.organizer_service.close_registration(501, event.id)
+
+    stale_payloads = [
+        Payload("event_book", event_id=event.id),
+        Payload("slot_pick", event_id=event.id, slot_id=event.slots[0].id),
+        Payload("register_confirm", event_id=event.id, slot_id=event.slots[0].id),
+    ]
+
+    for payload in stale_payloads:
+        await handlers.handle_callback(
+            user_id=101,
+            display_name="Анна",
+            chat_id=9001,
+            payload=payload.pack(),
+        )
+        assert fake_bot.sent[-1]["text"] == "Регистрация закрыта."
+
+    assert handlers.registration_service.list_user_registrations(101) == []
 
 
 async def test_repeated_start_deletes_previous_bot_message(
