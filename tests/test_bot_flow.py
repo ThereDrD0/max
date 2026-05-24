@@ -178,17 +178,31 @@ async def test_organizer_menu_paginates_and_returns_to_same_page(
     assert "🧑‍💼📚 Книга мероприятий Организатора" in first_page["text"]
     assert "Страница 1/3" in first_page["text"]
     assert "🔥 БЛИЖАЙШИЕ" in first_page["text"]
-    for day in range(1, 6):
+    for day in range(1, 7):
         assert f"Мероприятие {day}" in first_page["text"]
-    assert "Мероприятие 6" not in first_page["text"]
+    assert "Мероприятие 7" not in first_page["text"]
     assert _has_local_organizer_menu_image(first_page)
 
     first_buttons = _buttons(first_page)
     first_by_text = {button["text"]: button for button in first_buttons}
     manage_buttons = [
-        button for button in first_buttons if button["text"].startswith("🧑‍💼 ")
+        button for button in first_buttons if button["text"].startswith("⚙️ ")
     ]
-    assert len(manage_buttons) == 5
+    assert len(manage_buttons) == 6
+    assert "Управлять" not in _button_texts(first_page)
+    first_rows = _keyboard_rows(first_page)
+    assert [button["text"] for button in first_rows[0]] == [
+        "⚙️ 1. Мероприятие 1",
+        "⚙️ 2. Мероприятие 2",
+    ]
+    assert [button["text"] for button in first_rows[1]] == [
+        "⚙️ 3. Мероприятие 3",
+        "⚙️ 4. Мероприятие 4",
+    ]
+    assert [button["text"] for button in first_rows[2]] == [
+        "⚙️ 5. Мероприятие 5",
+        "⚙️ 6. Мероприятие 6",
+    ]
     assert first_by_text["⬅️ Назад"]["payload"] == Payload("org_menu", value="2").pack()
     assert first_by_text["➡️ Далее"]["payload"] == Payload("org_menu", value="1").pack()
 
@@ -210,7 +224,7 @@ async def test_organizer_menu_paginates_and_returns_to_same_page(
     manage_last = next(
         button
         for button in last_buttons
-        if button["text"].startswith("🧑‍💼 13. Управлять:")
+        if button["text"].startswith("⚙️ 13.")
     )
     assert manage_last["payload"] == Payload(
         "org_event",

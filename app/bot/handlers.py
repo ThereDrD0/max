@@ -83,6 +83,8 @@ REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
 )
 
 CATALOG_PAGE_SIZE = 5
+ORGANIZER_BOOK_PAGE_SIZE = 6
+ORGANIZER_BOOK_BUTTON_TITLE_MAX_CHARS = 30
 CATALOG_SOON_COUNT = 3
 MAIN_MENU_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "main-menu.png"
 ORGANIZER_MENU_IMAGE_PATH = (
@@ -1053,19 +1055,20 @@ class BotHandlers:
             )
             return
 
-        total_pages = max(ceil(len(book_events) / CATALOG_PAGE_SIZE), 1)
+        total_pages = max(ceil(len(book_events) / ORGANIZER_BOOK_PAGE_SIZE), 1)
         page = max(min(page, total_pages - 1), 0)
-        first_offset = 1 + page * CATALOG_PAGE_SIZE
+        first_offset = 1 + page * ORGANIZER_BOOK_PAGE_SIZE
         page_events = book_events[
-            page * CATALOG_PAGE_SIZE : (page + 1) * CATALOG_PAGE_SIZE
+            page * ORGANIZER_BOOK_PAGE_SIZE : (page + 1) * ORGANIZER_BOOK_PAGE_SIZE
         ]
         lines = [
             "🧑‍💼📚 Книга мероприятий Организатора",
             f"Страница {page + 1}/{total_pages}",
             "",
-            "Листайте книгу кнопками ниже и открывайте управление нужным мероприятием. 🗂️",
+            "Листайте книгу кнопками ниже и открывайте нужное мероприятие. 🗂️",
         ]
         current_section: str | None = None
+        current_button_row: list[dict] = []
         section_titles = {
             "upcoming": "🔥 БЛИЖАЙШИЕ",
             "past": "🕘 ПРОШЕДШИЕ",
@@ -1085,14 +1088,22 @@ class BotHandlers:
                 lines.append(
                     f"🧹 Удалится через {self._days_until_event_cleanup(event)} дн."
                 )
-            rows.append(
-                [
-                    callback_button(
-                        f"🧑‍💼 {offset}. Управлять: {self._short_button_title(event.title)}",
-                        Payload("org_event", event_id=event.id, value=str(page)),
-                    )
-                ]
+            button_title = self._short_button_title(
+                event.title,
+                max_chars=ORGANIZER_BOOK_BUTTON_TITLE_MAX_CHARS,
             )
+            current_button_row.append(
+                callback_button(
+                    f"⚙️ {offset}. {button_title}",
+                    Payload("org_event", event_id=event.id, value=str(page)),
+                )
+            )
+            if len(current_button_row) == 2:
+                rows.append(current_button_row)
+                current_button_row = []
+
+        if current_button_row:
+            rows.append(current_button_row)
 
         previous_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
