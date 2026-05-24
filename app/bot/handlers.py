@@ -99,6 +99,7 @@ STATE_EDIT_DATE = "edit_date"
 STATE_EDIT_TIME = "edit_time"
 STATE_EDIT_PLACE = "edit_place"
 STATE_MANUAL_REMINDER_TEXT = "manual_reminder_text"
+CREATE_EVENT_BUTTON_TEXT = "📝 Создать мероприятие"
 TAKE_CURRENT_TEXT = "♻️ ВЗЯТЬ ТЕКУЩЕЕ"
 
 
@@ -621,6 +622,7 @@ class BotHandlers:
         ]
         lines = ["📚 Книга мероприятий", f"Страница {page + 1}/{total_pages}"]
         rows: list[list[dict]] = []
+        current_detail_row: list[dict] = []
 
         def add_event_to_catalog(offset: int, event: Event) -> None:
             dev_line = f"\n[DEV] event_id={event.id}" if self.dev_mode else ""
@@ -629,14 +631,15 @@ class BotHandlers:
                 f"📅 {self._format_datetime(event.starts_at)}\n"
                 f"🕒 {event.duration_minutes} мин. · {self._format_event_format(event)}"
             )
-            rows.append(
-                [
-                    callback_button(
-                        f"ℹ️ Подробнее: {self._short_button_title(event.title)}",
-                        Payload("event_detail", event_id=event.id, value=str(page)),
-                    )
-                ]
+            current_detail_row.append(
+                callback_button(
+                    f"ℹ️ Подробнее: {self._short_button_title(event.title)}",
+                    Payload("event_detail", event_id=event.id, value=str(page)),
+                )
             )
+            if len(current_detail_row) == 2:
+                rows.append(current_detail_row.copy())
+                current_detail_row.clear()
 
         first_offset = 1 + page * CATALOG_PAGE_SIZE
         if page == 0:
@@ -663,6 +666,9 @@ class BotHandlers:
         else:
             for offset, event in enumerate(page_events, start=first_offset):
                 add_event_to_catalog(offset, event)
+
+        if current_detail_row:
+            rows.append(current_detail_row)
 
         previous_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
@@ -1042,7 +1048,9 @@ class BotHandlers:
                 "✨ Пока в книге Организатора нет мероприятий. "
                 "Создайте первое — оно появится здесь сразу после заполнения."
             )
-            rows.append([callback_button("➕ Создать мероприятие", Payload("org_create"))])
+            rows.append(
+                [callback_button(CREATE_EVENT_BUTTON_TEXT, Payload("org_create"))]
+            )
             rows.append([self._main_menu_button()])
             await self._send(
                 user_id=user_id,
@@ -1119,7 +1127,9 @@ class BotHandlers:
                 ),
             ]
         )
-        rows.append([callback_button("➕ Создать мероприятие", Payload("org_create"))])
+        rows.append(
+            [callback_button(CREATE_EVENT_BUTTON_TEXT, Payload("org_create"))]
+        )
         rows.append([self._main_menu_button()])
         await self._send(
             user_id=user_id,

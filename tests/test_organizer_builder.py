@@ -239,7 +239,8 @@ async def test_organizer_menu_allows_role_to_create_event_without_existing_event
     message = fake_bot.sent[-1]
     assert "🧑‍💼📚 Книга мероприятий Организатора" in message["text"]
     assert "Пока в книге Организатора нет мероприятий" in message["text"]
-    assert "Создать мероприятие" in _button_texts(message)
+    assert "📝 Создать мероприятие" in _button_texts(message)
+    assert "➕ Создать мероприятие" not in _button_texts(message)
     assert _has_local_organizer_menu_image(message)
     assert "нет доступа" not in message["text"].lower()
 

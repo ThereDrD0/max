@@ -450,6 +450,16 @@ async def test_catalog_book_first_page_highlights_soon_events_without_duplicates
     button_texts = [button["text"] for button in buttons]
     detail_buttons = [text for text in button_texts if text.startswith("ℹ️ Подробнее:")]
     assert len(detail_buttons) == 5
+    rows = _keyboard_rows(message)
+    assert [button["text"] for button in rows[0]] == [
+        "ℹ️ Подробнее: Событие 1",
+        "ℹ️ Подробнее: Событие 2",
+    ]
+    assert [button["text"] for button in rows[1]] == [
+        "ℹ️ Подробнее: Событие 3",
+        "ℹ️ Подробнее: Событие 4",
+    ]
+    assert [button["text"] for button in rows[2]] == ["ℹ️ Подробнее: Событие 5"]
     assert "🎫 Мои записи" not in button_texts
     assert "⬅️ Назад" in button_texts
     assert "➡️ Далее" in button_texts
