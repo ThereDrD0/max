@@ -60,6 +60,7 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
     assert message["attachments"][-1]["type"] == "inline_keyboard"
     assert message["text"].startswith("🧑‍💼 МЕНЮ ОРГАНИЗАТОРА")
     assert user_card_text in message["text"]
+    assert "✅ Свободных мест: 2 из 2" in message["text"]
     assert "↩️ Отмена:" not in message["text"]
     button_texts = _button_texts(message)
     assert "🗓 Изменить дату или время" in button_texts
@@ -69,6 +70,35 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
     assert "⬅️ Назад" in button_texts
     assert "Картинка" not in button_texts
     assert "Закрыть регистрацию" not in button_texts
+
+
+async def test_organizer_event_menu_shows_slot_capacity_as_current_of_maximum(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Экскурсия", with_slots=True)
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "SLOT01",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    handlers.registration_service.create_registration(101, event.id, event.slots[0].id)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_event", event_id=event.id).pack(),
+    )
+
+    assert "✅ Свободных мест: 1 из 2" in fake_bot.sent[-1]["text"]
 
 
 async def test_organizer_menu_allows_role_to_create_event_without_existing_events(

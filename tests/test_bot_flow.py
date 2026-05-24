@@ -764,8 +764,8 @@ async def test_event_detail_refreshes_available_places_after_other_registration(
         payload=Payload("event_detail", event_id=event.id).pack(),
     )
 
-    assert "✅ Свободных мест: 2" in fake_bot.sent[-2]["text"]
-    assert "✅ Свободных мест: 1" in fake_bot.sent[-1]["text"]
+    assert "✅ Свободных мест: 2 из 2" in fake_bot.sent[-2]["text"]
+    assert "✅ Свободных мест: 1 из 2" in fake_bot.sent[-1]["text"]
 
 
 async def test_event_detail_hides_booking_when_all_slots_are_full(
@@ -793,9 +793,37 @@ async def test_event_detail_hides_booking_when_all_slots_are_full(
     )
 
     message = fake_bot.sent[-1]
-    assert "✅ Свободных мест: 0" in message["text"]
+    assert "✅ Свободных мест: 0 из 2" in message["text"]
     assert "Свободных мест нет." in message["text"]
     assert "📝 Записаться" not in _button_texts(message)
+
+
+async def test_event_detail_shows_slot_capacity_as_current_of_maximum(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Экскурсия", with_slots=True)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "SLOT01",
+    )
+    for user_id in [101, 201]:
+        handlers.registration_service.upsert_user(user_id, f"User {user_id}")
+        handlers.registration_service.record_profile_consent(user_id, "docs")
+    handlers.registration_service.create_registration(201, event.id, event.slots[0].id)
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("event_detail", event_id=event.id).pack(),
+    )
+
+    assert "✅ Свободных мест: 1 из 2" in fake_bot.sent[-1]["text"]
 
 
 async def test_stale_booking_button_rechecks_available_places(storage, fake_bot, fixed_now):

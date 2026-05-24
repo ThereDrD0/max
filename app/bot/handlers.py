@@ -1938,10 +1938,19 @@ class BotHandlers:
             f"🕒 {event.duration_minutes} мин. · {self._format_event_format(event)}\n"
             f"📌 Требования: {event.requirements}\n"
             f"📍 Адрес/ссылка: {event.location_or_url}\n"
-            f"✅ Свободных мест: {free_places}"
+            f"✅ Свободных мест: {self._format_places_count(event, free_places)}"
             f"{status_text}"
             f"{share_text}"
         )
+
+    @staticmethod
+    def _format_places_count(event: Event, free_places: int) -> str:
+        maximum_places = (
+            sum(slot.capacity for slot in event.slots)
+            if event.slots
+            else event.capacity_total
+        )
+        return f"{free_places} из {maximum_places}"
 
     @staticmethod
     def _builder_cancel_button_text(state: OrganizerState) -> str:
