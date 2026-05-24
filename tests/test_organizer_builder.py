@@ -76,6 +76,11 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
         == ["🚫 Закрыть регистрацию", "🛑 Закрыть мероприятие"]
         for row in rows
     )
+    assert any(
+        [button["text"] for button in row]
+        == ["🔔 Напомнить участникам", "🔗 Поделиться"]
+        for row in rows
+    )
     assert "🚫 Закрыть регистрацию" in button_texts
     assert "🛑 Закрыть мероприятие" in button_texts
     assert "🔗 Поделиться" in button_texts

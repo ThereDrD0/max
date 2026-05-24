@@ -1131,6 +1131,15 @@ class BotHandlers:
         self.organizer_service.get_event_registrations(user_id, event_id)
         event = self.storage.get_event(event_id)
         assert event is not None
+        deeplink = await self._event_deeplink(event) if self._event_visible_to_users(event) else None
+        reminder_buttons = [
+            callback_button(
+                "🔔 Напомнить участникам",
+                Payload("org_remind", event_id=event_id),
+            )
+        ]
+        if deeplink:
+            reminder_buttons.append(clipboard_button("🔗 Поделиться", deeplink))
         rows = [
             [
                 callback_button(
@@ -1142,12 +1151,7 @@ class BotHandlers:
                     Payload("org_place", event_id=event_id),
                 )
             ],
-            [
-                callback_button(
-                    "🔔 Напомнить участникам",
-                    Payload("org_remind", event_id=event_id),
-                )
-            ],
+            reminder_buttons,
         ]
         close_buttons = []
         if self._event_visible_to_users(event) and not event.registration_closed:
@@ -1176,9 +1180,6 @@ class BotHandlers:
                 )
             ]
         )
-        deeplink = await self._event_deeplink(event) if self._event_visible_to_users(event) else None
-        if deeplink:
-            rows.append([clipboard_button("🔗 Поделиться", deeplink)])
         rows.append([callback_button("⬅️ Назад", Payload("org_menu", value=str(page)))])
         free = self.registration_service.available_places(event.id, None)
         share_text = "\n\n🔗 Ссылка: Нажмите чтобы скопировать" if deeplink else ""
