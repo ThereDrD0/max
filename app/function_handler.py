@@ -101,6 +101,7 @@ async def _handle_timer(
         bot_client,
         now=now,
         max_rps=settings.max_api_rps,
+        max_bot_username=settings.max_bot_username,
     )
     sent = await worker.process_due(limit=100)
     return _response(200, {"ok": True, "sent": sent, "removed_events": removed_events})

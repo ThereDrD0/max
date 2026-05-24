@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import ydb
 
@@ -30,6 +30,10 @@ from app.enums import (
     NotificationKind,
     OutboxStatus,
     RegistrationStatus,
+)
+from app.services.reminders import (
+    LEGACY_AUTOMATIC_REMINDER_KINDS,
+    automatic_reminder_schedule,
 )
 from app.storage.base import CodeGenerator, ReminderRenderer
 from app.storage.entities import (
@@ -1043,6 +1047,33 @@ class YdbStorage:
         self._execute(_UPSERT_NOTIFICATION, _notification_params(item))
         return item
 
+    def sync_registration_reminders(
+        self,
+        *,
+        now: datetime,
+        render_reminder: ReminderRenderer,
+    ) -> int:
+        current = _dt(now)
+        changed = self._skip_legacy_reminders()
+        rows = self._query(
+            """
+            SELECT id FROM registrations
+            WHERE notifications_enabled = true
+              AND status IN ("confirmed", "attended");
+            """
+        )
+        for row in rows:
+            registration = self.get_registration(int(row["id"]))
+            if registration is None or registration.event is None:
+                continue
+            changed += self._sync_registration_reminder_items(
+                registration,
+                registration.event,
+                now=current,
+                render_reminder=render_reminder,
+            )
+        return changed
+
     def list_notifications(self) -> list[NotificationOutbox]:
         rows = self._query("SELECT * FROM notification_outbox ORDER BY id;")
         return [self._attach_notification(_notification(row)) for row in rows]
@@ -1678,12 +1709,8 @@ class YdbStorage:
         now: datetime,
         render_reminder: ReminderRenderer,
     ) -> None:
-        reminders = [
-            (NotificationKind.REMINDER_24H, event.starts_at - timedelta(days=1)),
-            (NotificationKind.REMINDER_1H, event.starts_at - timedelta(hours=1)),
-        ]
-        for kind, send_after in reminders:
-            if send_after <= now:
+        for kind, send_after in automatic_reminder_schedule(event, registration):
+            if send_after < now:
                 continue
             item = NotificationOutbox(
                 id=self._new_id("notification_outbox"),
@@ -1696,6 +1723,171 @@ class YdbStorage:
                 created_at=now,
             )
             self._tx_execute(tx, _UPSERT_NOTIFICATION, _notification_params(item))
+
+    def _skip_legacy_reminders(self) -> int:
+        changed = 0
+        for kind in LEGACY_AUTOMATIC_REMINDER_KINDS:
+            rows = self._query(
+                """
+                DECLARE $kind AS Utf8;
+                SELECT id FROM notification_outbox
+                WHERE kind = $kind AND status = "pending";
+                """,
+                {"$kind": _utf8(kind.value)},
+            )
+            changed += len(rows)
+            self._execute(
+                """
+                DECLARE $kind AS Utf8;
+                DECLARE $status AS Utf8;
+                DECLARE $last_error AS Optional<Utf8>;
+                UPDATE notification_outbox
+                SET status = $status,
+                    last_error = $last_error
+                WHERE kind = $kind AND status = "pending";
+                """,
+                {
+                    "$kind": _utf8(kind.value),
+                    "$status": _utf8(OutboxStatus.SKIPPED.value),
+                    "$last_error": _opt_utf8("Заменено новой схемой напоминаний"),
+                },
+            )
+        return changed
+
+    def _sync_registration_reminder_items(
+        self,
+        registration: Registration,
+        event: Event,
+        *,
+        now: datetime,
+        render_reminder: ReminderRenderer,
+    ) -> int:
+        changed = 0
+        for kind, send_after in automatic_reminder_schedule(event, registration):
+            rows = self._query(
+                """
+                DECLARE $registration_id AS Int64;
+                DECLARE $kind AS Utf8;
+                SELECT * FROM notification_outbox
+                WHERE registration_id = $registration_id AND kind = $kind
+                ORDER BY id;
+                """,
+                {
+                    "$registration_id": _int(registration.id),
+                    "$kind": _utf8(kind.value),
+                },
+            )
+            items = [_notification(row) for row in rows]
+            pending_items = [item for item in items if item.status == OutboxStatus.PENDING]
+            has_non_skipped = any(item.status != OutboxStatus.SKIPPED for item in items)
+            if send_after < now and not pending_items:
+                continue
+            if send_after < now and kind != NotificationKind.REMINDER_START:
+                for item in pending_items:
+                    self._update_notification_status(
+                        item.id,
+                        status=OutboxStatus.SKIPPED,
+                        error="Срок напоминания уже прошел",
+                    )
+                    changed += 1
+                continue
+            message_text = render_reminder(kind, event, registration)
+            if pending_items:
+                item = pending_items[0]
+                if (
+                    item.send_after != send_after
+                    or item.message_text != message_text
+                    or item.event_id != event.id
+                    or item.user_id != registration.user_id
+                ):
+                    self._update_pending_reminder(
+                        item.id,
+                        event_id=event.id,
+                        user_id=registration.user_id,
+                        message_text=message_text,
+                        send_after=send_after,
+                    )
+                    changed += 1
+                for duplicate in pending_items[1:]:
+                    self._update_notification_status(
+                        duplicate.id,
+                        status=OutboxStatus.SKIPPED,
+                        error="Дубликат автоматического напоминания",
+                    )
+                    changed += 1
+                continue
+            if has_non_skipped:
+                continue
+            self.add_notification(
+                NotificationOutbox(
+                    id=0,
+                    event_id=event.id,
+                    registration_id=registration.id,
+                    user_id=registration.user_id,
+                    kind=kind,
+                    message_text=message_text,
+                    send_after=send_after,
+                    created_at=now,
+                )
+            )
+            changed += 1
+        return changed
+
+    def _update_pending_reminder(
+        self,
+        notification_id: int,
+        *,
+        event_id: int,
+        user_id: int,
+        message_text: str,
+        send_after: datetime,
+    ) -> None:
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $event_id AS Int64;
+            DECLARE $user_id AS Int64;
+            DECLARE $message_text AS Utf8;
+            DECLARE $send_after AS Timestamp;
+            UPDATE notification_outbox
+            SET event_id = $event_id,
+                user_id = $user_id,
+                message_text = $message_text,
+                send_after = $send_after
+            WHERE id = $id;
+            """,
+            {
+                "$id": _int(notification_id),
+                "$event_id": _int(event_id),
+                "$user_id": _int(user_id),
+                "$message_text": _utf8(message_text),
+                "$send_after": _timestamp(send_after),
+            },
+        )
+
+    def _update_notification_status(
+        self,
+        notification_id: int,
+        *,
+        status: OutboxStatus,
+        error: str,
+    ) -> None:
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $status AS Utf8;
+            DECLARE $last_error AS Optional<Utf8>;
+            UPDATE notification_outbox
+            SET status = $status,
+                last_error = $last_error
+            WHERE id = $id;
+            """,
+            {
+                "$id": _int(notification_id),
+                "$status": _utf8(status.value),
+                "$last_error": _opt_utf8(error),
+            },
+        )
 
     def _tx_audit(
         self,

@@ -238,6 +238,13 @@ class Storage(Protocol):
 
     def add_notification(self, item: NotificationOutbox) -> NotificationOutbox: ...
 
+    def sync_registration_reminders(
+        self,
+        *,
+        now: datetime,
+        render_reminder: ReminderRenderer,
+    ) -> int: ...
+
     def list_notifications(self) -> list[NotificationOutbox]: ...
 
     def list_due_notifications(

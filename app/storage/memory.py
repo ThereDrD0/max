@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from threading import RLock
 
 from app.domain import (
@@ -25,6 +25,10 @@ from app.enums import (
     NotificationKind,
     OutboxStatus,
     RegistrationStatus,
+)
+from app.services.reminders import (
+    LEGACY_AUTOMATIC_REMINDER_KINDS,
+    automatic_reminder_schedule,
 )
 from app.storage.base import CodeGenerator, ReminderRenderer
 from app.storage.entities import (
@@ -696,6 +700,40 @@ class MemoryStorage:
             self.notifications[item.id] = item
             return item
 
+    def sync_registration_reminders(
+        self,
+        *,
+        now: datetime,
+        render_reminder: ReminderRenderer,
+    ) -> int:
+        changed = 0
+        with self._lock:
+            for item in self.notifications.values():
+                if (
+                    item.kind in LEGACY_AUTOMATIC_REMINDER_KINDS
+                    and item.status == OutboxStatus.PENDING
+                ):
+                    item.status = OutboxStatus.SKIPPED
+                    item.last_error = "Заменено новой схемой напоминаний"
+                    changed += 1
+            for registration in list(self.registrations.values()):
+                if registration.status not in ACTIVE_REGISTRATION_STATUSES:
+                    continue
+                if not registration.notifications_enabled:
+                    continue
+                event = self.events.get(registration.event_id)
+                if event is None:
+                    continue
+                event.slots = self._event_slots(event.id)
+                attached = self._attach_registration(registration)
+                changed += self._sync_registration_reminder_items(
+                    attached,
+                    event,
+                    now=now,
+                    render_reminder=render_reminder,
+                )
+        return changed
+
     def list_notifications(self) -> list[NotificationOutbox]:
         return sorted(self.notifications.values(), key=lambda item: item.id)
 
@@ -780,12 +818,8 @@ class MemoryStorage:
         now: datetime,
         render_reminder: ReminderRenderer,
     ) -> None:
-        reminders = [
-            (NotificationKind.REMINDER_24H, event.starts_at - timedelta(days=1)),
-            (NotificationKind.REMINDER_1H, event.starts_at - timedelta(hours=1)),
-        ]
-        for kind, send_after in reminders:
-            if send_after > now:
+        for kind, send_after in automatic_reminder_schedule(event, registration):
+            if send_after >= now:
                 self.add_notification(
                     NotificationOutbox(
                         id=0,
@@ -798,6 +832,67 @@ class MemoryStorage:
                         created_at=now,
                     )
                 )
+
+    def _sync_registration_reminder_items(
+        self,
+        registration: Registration,
+        event: Event,
+        *,
+        now: datetime,
+        render_reminder: ReminderRenderer,
+    ) -> int:
+        changed = 0
+        for kind, send_after in automatic_reminder_schedule(event, registration):
+            items = [
+                item
+                for item in self.notifications.values()
+                if item.registration_id == registration.id and item.kind == kind
+            ]
+            pending_items = [item for item in items if item.status == OutboxStatus.PENDING]
+            has_non_skipped = any(item.status != OutboxStatus.SKIPPED for item in items)
+            if send_after < now and not pending_items:
+                continue
+            if send_after < now and kind != NotificationKind.REMINDER_START:
+                for item in pending_items:
+                    item.status = OutboxStatus.SKIPPED
+                    item.last_error = "Срок напоминания уже прошел"
+                    changed += 1
+                continue
+            message_text = render_reminder(kind, event, registration)
+            if pending_items:
+                item = pending_items[0]
+                if (
+                    item.send_after != send_after
+                    or item.message_text != message_text
+                    or item.event_id != event.id
+                    or item.user_id != registration.user_id
+                ):
+                    item.send_after = send_after
+                    item.message_text = message_text
+                    item.event_id = event.id
+                    item.user_id = registration.user_id
+                    changed += 1
+                for duplicate in pending_items[1:]:
+                    duplicate.status = OutboxStatus.SKIPPED
+                    duplicate.last_error = "Дубликат автоматического напоминания"
+                    changed += 1
+                continue
+            if has_non_skipped:
+                continue
+            self.add_notification(
+                NotificationOutbox(
+                    id=0,
+                    event_id=event.id,
+                    registration_id=registration.id,
+                    user_id=registration.user_id,
+                    kind=kind,
+                    message_text=message_text,
+                    send_after=send_after,
+                    created_at=now,
+                )
+            )
+            changed += 1
+        return changed
 
     def _ensure_user_exists(self, user_id: int, *, now: datetime) -> None:
         if user_id not in self.users:

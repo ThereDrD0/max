@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from app.enums import NotificationKind
+from app.services.reminders import render_automatic_reminder
 from app.storage.base import Storage
 from app.storage.entities import Consent, Event, Registration, User
 
@@ -114,13 +115,4 @@ class RegistrationService:
         event: Event,
         registration: Registration,
     ) -> str:
-        if kind == NotificationKind.REMINDER_24H:
-            prefix = "Напоминание: мероприятие начнётся примерно через сутки."
-        else:
-            prefix = "Напоминание: мероприятие начнётся примерно через час."
-        return (
-            f"{prefix}\n\n"
-            f"{event.title}\n"
-            f"Код записи: {registration.code}\n"
-            f"Место/ссылка: {event.location_or_url}"
-        )
+        return render_automatic_reminder(kind, event, registration)

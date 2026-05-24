@@ -40,7 +40,7 @@ def test_enqueue_test_reminders_uses_simulated_starts_in_text(storage, fixed_now
     )
 
     assert len(created) == 1
-    assert "примерно через 2 часа" in created[0].message_text
+    assert "Начало: 24.05.2026 12:00 (через 2 часа)" in created[0].message_text
     assert "Код записи: TEST01" in created[0].message_text
 
 

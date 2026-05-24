@@ -12,8 +12,9 @@ from app.domain import (
     LateCancellationDeniedError,
     NoSeatsAvailableError,
 )
-from app.enums import LateCancelPolicy, OutboxStatus, RegistrationStatus
+from app.enums import LateCancelPolicy, NotificationKind, OutboxStatus, RegistrationStatus
 from app.services.registration import RegistrationService
+from app.storage.entities import NotificationOutbox
 from tests.conftest import create_event
 
 
@@ -49,7 +50,21 @@ def test_registration_creates_code_schedules_reminders_and_blocks_duplicates(
     assert registration.status == RegistrationStatus.CONFIRMED
     assert registration.notifications_enabled is True
     outbox = storage.list_notifications()
-    assert [item.kind.value for item in outbox] == ["reminder_24h", "reminder_1h"]
+    assert [item.kind.value for item in outbox] == [
+        "reminder_3d",
+        "reminder_24h",
+        "reminder_3h",
+        "reminder_start",
+    ]
+    assert [item.send_after for item in outbox] == [
+        fixed_now,
+        event.starts_at - timedelta(days=1),
+        event.starts_at - timedelta(hours=3),
+        event.starts_at,
+    ]
+    assert "🔔 Напоминание о мероприятии" in outbox[0].message_text
+    assert "Начало: 24.05.2026 12:00 (через 3 дня)" in outbox[0].message_text
+    assert "Код записи: ABC123" in outbox[0].message_text
     assert all(item.status == OutboxStatus.PENDING for item in outbox)
 
     with pytest.raises(DuplicateActiveRegistrationError):
@@ -153,6 +168,102 @@ def test_slot_capacity_is_counted_per_slot(storage, fixed_now):
 
     second = service.create_registration(102, event.id, slots[1].id)
     assert second.slot_id == slots[1].id
+
+
+def test_slot_registration_schedules_reminders_from_slot_start(storage, fixed_now):
+    event = create_event(storage, fixed_now, capacity=10, with_slots=True)
+    slot = event.slots[1]
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "SLOT02",
+    )
+    service.upsert_user(102, "Борис")
+    service.record_profile_consent(102, "hackathon-2026-05")
+
+    service.create_registration(102, event.id, slot.id)
+
+    outbox = storage.list_notifications()
+    assert [item.kind for item in outbox] == [
+        NotificationKind.REMINDER_3D,
+        NotificationKind.REMINDER_24H,
+        NotificationKind.REMINDER_3H,
+        NotificationKind.REMINDER_START,
+    ]
+    assert [item.send_after for item in outbox] == [
+        slot.starts_at - timedelta(days=3),
+        slot.starts_at - timedelta(days=1),
+        slot.starts_at - timedelta(hours=3),
+        slot.starts_at,
+    ]
+    assert "Слот: 11:00" in outbox[0].message_text
+
+
+def test_sync_registration_reminders_backfills_only_future_items(
+    storage, fixed_now
+):
+    event = create_event(storage, fixed_now, starts_in=timedelta(days=2))
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "SYNC01",
+    )
+    service.upsert_user(101, "Анна")
+    service.record_profile_consent(101, "hackathon-2026-05")
+    service.create_registration(101, event.id, None)
+    storage.notifications.clear()
+
+    created = storage.sync_registration_reminders(
+        now=fixed_now,
+        render_reminder=RegistrationService._render_reminder,
+    )
+
+    outbox = storage.list_notifications()
+    assert created == 3
+    assert [item.kind for item in outbox] == [
+        NotificationKind.REMINDER_24H,
+        NotificationKind.REMINDER_3H,
+        NotificationKind.REMINDER_START,
+    ]
+    assert all(item.send_after >= fixed_now for item in outbox)
+
+
+def test_sync_registration_reminders_skips_legacy_one_hour_items(
+    storage, fixed_now
+):
+    event = create_event(storage, fixed_now)
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "LEGACY",
+    )
+    service.upsert_user(101, "Анна")
+    service.record_profile_consent(101, "hackathon-2026-05")
+    registration = service.create_registration(101, event.id, None)
+    storage.notifications.clear()
+    legacy = storage.add_notification(
+        NotificationOutbox(
+            id=0,
+            event_id=event.id,
+            registration_id=registration.id,
+            user_id=101,
+            kind=NotificationKind.REMINDER_1H,
+            message_text="Старое напоминание.",
+            send_after=event.starts_at - timedelta(hours=1),
+            created_at=fixed_now,
+        )
+    )
+
+    storage.sync_registration_reminders(
+        now=fixed_now,
+        render_reminder=RegistrationService._render_reminder,
+    )
+
+    assert legacy.status == OutboxStatus.SKIPPED
+    assert all(
+        item.kind != NotificationKind.REMINDER_1H or item.status == OutboxStatus.SKIPPED
+        for item in storage.list_notifications()
+    )
 
 
 def test_concurrent_registration_on_last_seat_creates_only_one_active_record(

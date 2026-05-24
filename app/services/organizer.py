@@ -14,6 +14,7 @@ from app.enums import (
     NotificationKind,
     RegistrationStatus,
 )
+from app.services.reminders import render_automatic_reminder, render_manual_reminder
 from app.storage.base import Storage
 from app.storage.entities import Event, EventSlot, NotificationOutbox, Registration
 
@@ -75,6 +76,10 @@ class OrganizerService:
             now=self.now(),
         )
         if previous_start is not None and previous_start != starts_at:
+            self.storage.sync_registration_reminders(
+                now=self.now(),
+                render_reminder=render_automatic_reminder,
+            )
             self.enqueue_manual_notification(
                 actor_user_id,
                 event_id,
@@ -145,6 +150,10 @@ class OrganizerService:
             now=self.now(),
         )
         if previous_start is not None and previous_start != updated.starts_at:
+            self.storage.sync_registration_reminders(
+                now=self.now(),
+                render_reminder=render_automatic_reminder,
+            )
             self.enqueue_manual_notification(
                 actor_user_id,
                 updated.id,
@@ -228,9 +237,10 @@ class OrganizerService:
                         registration_id=registration.id,
                         user_id=registration.user_id,
                         kind=NotificationKind.MANUAL_REMINDER,
-                        message_text=self._render_manual_reminder(
+                        message_text=render_manual_reminder(
                             event or registration.event,
                             registration,
+                            now=current,
                             custom_text=custom_text,
                             starts_in_text=starts_in_text,
                         ),
@@ -251,30 +261,6 @@ class OrganizerService:
         if kind == NotificationKind.JOIN_LINK_CHANGED:
             return f"Обновление по мероприятию «{title}»: обновлена ссылка на подключение."
         raise InvalidNotificationKindError("Неподдерживаемый тип уведомления")
-
-    @staticmethod
-    def _render_manual_reminder(
-        event: Event | None,
-        registration: Registration,
-        *,
-        custom_text: str | None,
-        starts_in_text: str | None,
-    ) -> str:
-        clean_text = (custom_text or "").strip()
-        if not clean_text:
-            clean_starts_in = (starts_in_text or "").strip()
-            if clean_starts_in:
-                clean_text = f"Напоминание: мероприятие начнётся примерно через {clean_starts_in}."
-            else:
-                clean_text = "Напоминание: мероприятие скоро начнётся."
-        title = event.title if event else "Мероприятие"
-        lines = [clean_text, "", title]
-        if registration.slot is not None:
-            lines.append(f"Слот: {registration.slot.title}")
-        lines.append(f"Код записи: {registration.code}")
-        if event is not None:
-            lines.append(f"Место/ссылка: {event.location_or_url}")
-        return "\n".join(lines)
 
     def _ensure_future_start(self, starts_at: datetime) -> None:
         if starts_at <= self.now():

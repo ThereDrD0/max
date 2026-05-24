@@ -44,3 +44,54 @@ async def test_notification_worker_sends_due_items_and_skips_disabled_registrati
     assert sent_count == 0
     assert fake_bot.sent == []
     assert manual_item.status == OutboxStatus.SKIPPED
+
+
+async def test_notification_worker_sends_reminder_with_image_and_detail_button(
+    storage, fake_bot, fixed_now
+):
+    event = create_event(storage, fixed_now, title="Консультация по приёму", capacity=10)
+    storage.assign_event_slug(event.id, "consultation", now=fixed_now)
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "NOTE01",
+    )
+    service.upsert_user(101, "Анна")
+    service.record_profile_consent(101, "hackathon-2026-05")
+    service.create_registration(101, event.id, None)
+
+    worker = NotificationWorker(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        max_rps=1000,
+        max_bot_username="id123_bot",
+    )
+    sent_count = await worker.process_due(limit=10)
+
+    assert sent_count == 1
+    message = fake_bot.sent[-1]
+    assert "🔔 Напоминание о мероприятии" in message["text"]
+    assert "Начало: 24.05.2026 12:00 (через 3 дня)" in message["text"]
+    assert any(
+        getattr(attachment, "path", "").replace("\\", "/").endswith(
+            "app/assets/notification-reminder.png"
+        )
+        for attachment in message["attachments"]
+    )
+    assert _detail_button(message) == {
+        "type": "link",
+        "text": "ℹ️ Подробнее",
+        "url": "https://max.ru/id123_bot?start=e_consultation",
+    }
+
+
+def _detail_button(message: dict) -> dict | None:
+    for attachment in message["attachments"]:
+        if not isinstance(attachment, dict) or attachment.get("type") != "inline_keyboard":
+            continue
+        for row in attachment["payload"]["buttons"]:
+            for button in row:
+                if button.get("text") == "ℹ️ Подробнее":
+                    return button
+    return None

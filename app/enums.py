@@ -26,7 +26,10 @@ class NotificationKind(StrEnum):
     VENUE_CHANGED = "venue_changed"
     JOIN_LINK_CHANGED = "join_link_changed"
     MANUAL_REMINDER = "manual_reminder"
+    REMINDER_3D = "reminder_3d"
     REMINDER_24H = "reminder_24h"
+    REMINDER_3H = "reminder_3h"
+    REMINDER_START = "reminder_start"
     REMINDER_1H = "reminder_1h"
 
 
