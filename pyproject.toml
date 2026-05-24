@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "max-university-event-bot"
+version = "0.1.0"
+description = "MAX bot for university event registration"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.27,<1",
+    "maxapi[fastapi]>=1.1,<2",
+    "pydantic-settings>=2.7,<3",
+    "python-dotenv>=1.0,<2",
+    "PyYAML>=6.0,<7",
+    "uvicorn[standard]>=0.30,<1",
+    "ydb>=3.29,<4",
+]
+
+[project.optional-dependencies]
+migration = [
+    "psycopg[binary]>=3.2,<4",
+    "SQLAlchemy>=2.0,<3",
+]
+test = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<1",
+    "SQLAlchemy>=2.0,<3",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"

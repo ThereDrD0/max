@@ -1,0 +1,13 @@
+.env
+.git
+.pytest_cache
+__pycache__
+*.pyc
+data
+dist
+build
+htmlcov
+maxapi
+max-bot-api-client-go
+max-bot-api-client-ts
+max-bot-example-todolist

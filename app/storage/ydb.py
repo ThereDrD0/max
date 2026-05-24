@@ -1,0 +1,2047 @@
+from __future__ import annotations
+
+import json
+import os
+import secrets
+from datetime import datetime, timedelta, timezone
+
+import ydb
+
+from app.domain import (
+    AccessDeniedError,
+    BotDomainError,
+    ConsentRequiredError,
+    DuplicateActiveRegistrationError,
+    DuplicateEventSlugError,
+    EventNotFoundError,
+    InvalidNotificationKindError,
+    LateCancellationDeniedError,
+    NoSeatsAvailableError,
+    RegistrationClosedError,
+    RegistrationNotFoundError,
+    SlotNotFoundError,
+    SlotRequiredError,
+)
+from app.enums import (
+    ACTIVE_REGISTRATION_STATUSES,
+    MANUAL_NOTIFICATION_KINDS,
+    EventFormat,
+    LateCancelPolicy,
+    NotificationKind,
+    OutboxStatus,
+    RegistrationStatus,
+)
+from app.storage.base import CodeGenerator, ReminderRenderer
+from app.storage.entities import (
+    AuditLog,
+    Consent,
+    Event,
+    EventSlot,
+    NotificationOutbox,
+    OrganizerEvent,
+    OrganizerState,
+    Registration,
+    RoleAssignment,
+    User,
+    utc_now,
+)
+
+
+class YdbStorage:
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        database: str,
+        use_metadata_credentials: bool = False,
+        pool_size: int = 20,
+    ) -> None:
+        credentials = self._credentials(use_metadata_credentials)
+        self.driver = ydb.Driver(
+            endpoint=endpoint,
+            database=database,
+            credentials=credentials,
+        )
+        self.driver.wait(timeout=10, fail_fast=True)
+        self.pool = ydb.QuerySessionPool(self.driver, size=pool_size)
+
+    def ready(self) -> bool:
+        try:
+            self._query("SELECT 1 AS ok;")
+        except Exception:
+            return False
+        return True
+
+    def upsert_user(
+        self,
+        user_id: int,
+        display_name: str,
+        *,
+        is_bot: bool = False,
+        now: datetime | None = None,
+    ) -> User:
+        current = _dt(now or utc_now())
+        existing = self.get_user(user_id)
+        created_at = existing.created_at if existing else current
+        user = User(
+            user_id=user_id,
+            display_name=display_name or (existing.display_name if existing else f"Пользователь {user_id}"),
+            is_bot=is_bot,
+            created_at=created_at,
+            updated_at=current,
+        )
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $display_name AS Utf8;
+            DECLARE $is_bot AS Bool;
+            DECLARE $created_at AS Timestamp;
+            DECLARE $updated_at AS Timestamp;
+            UPSERT INTO users (user_id, display_name, is_bot, created_at, updated_at)
+            VALUES ($user_id, $display_name, $is_bot, $created_at, $updated_at);
+            """,
+            {
+                "$user_id": _int(user.user_id),
+                "$display_name": _utf8(user.display_name),
+                "$is_bot": _bool(user.is_bot),
+                "$created_at": _timestamp(user.created_at),
+                "$updated_at": _timestamp(user.updated_at),
+            },
+        )
+        return user
+
+    def get_user(self, user_id: int) -> User | None:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT * FROM users WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        return _user(row) if row else None
+
+    def get_last_bot_message_id(self, user_id: int) -> str | None:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT last_bot_message_id FROM bot_sessions WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        if row is None:
+            return None
+        message_id = row.get("last_bot_message_id")
+        return str(message_id) if message_id else None
+
+    def set_last_bot_message_id(
+        self,
+        user_id: int,
+        message_id: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        if message_id is None:
+            self._execute(
+                """
+                DECLARE $user_id AS Int64;
+                DELETE FROM bot_sessions WHERE user_id = $user_id;
+                """,
+                {"$user_id": _int(user_id)},
+            )
+            return
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $last_bot_message_id AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPSERT INTO bot_sessions (user_id, last_bot_message_id, updated_at)
+            VALUES ($user_id, $last_bot_message_id, $updated_at);
+            """,
+            {
+                "$user_id": _int(user_id),
+                "$last_bot_message_id": _utf8(message_id),
+                "$updated_at": _timestamp(now or utc_now()),
+            },
+        )
+
+    def record_profile_consent(
+        self,
+        user_id: int,
+        document_version: str,
+        *,
+        now: datetime,
+    ) -> Consent:
+        current = _dt(now)
+        self.upsert_user(user_id, f"Пользователь {user_id}", now=current)
+        consent = Consent(
+            id=self._new_id("consents"),
+            user_id=user_id,
+            document_version=document_version,
+            profile_data_allowed=True,
+            created_at=current,
+        )
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $user_id AS Int64;
+            DECLARE $document_version AS Utf8;
+            DECLARE $profile_data_allowed AS Bool;
+            DECLARE $created_at AS Timestamp;
+            UPSERT INTO consents (id, user_id, document_version, profile_data_allowed, created_at)
+            VALUES ($id, $user_id, $document_version, $profile_data_allowed, $created_at);
+            """,
+            _consent_params(consent),
+        )
+        self._audit(user_id, "consent.accepted", "user", str(user_id), now=current)
+        return consent
+
+    def has_profile_consent(self, user_id: int) -> bool:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT id FROM consents
+            WHERE user_id = $user_id AND profile_data_allowed = true
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        return row is not None
+
+    def add_event(self, event: Event, *, slots: list[EventSlot] | None = None) -> Event:
+        if not event.id:
+            event.id = self._new_id("events")
+        event.booked_count = event.booked_count or 0
+        self._execute(_UPSERT_EVENT, _event_params(event))
+        event.slots = []
+        for slot in slots or []:
+            if not slot.id:
+                slot.id = self._new_id("event_slots")
+            slot.event_id = event.id
+            slot.booked_count = slot.booked_count or 0
+            self._execute(_UPSERT_SLOT, _slot_params(slot))
+            event.slots.append(slot)
+        return event
+
+    def get_event(self, event_id: int) -> Event | None:
+        row = self._one(
+            """
+            DECLARE $id AS Int64;
+            SELECT * FROM events WHERE id = $id;
+            """,
+            {"$id": _int(event_id)},
+        )
+        if row is None:
+            return None
+        event = _event(row)
+        event.slots = self._event_slots(event.id)
+        self._attach_event_image(event)
+        return event
+
+    def assign_event_slug(
+        self,
+        event_id: int,
+        slug: str,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        self._require_event(event_id)
+        existing = self._one(
+            """
+            DECLARE $slug AS Utf8;
+            SELECT event_id FROM event_deeplinks WHERE slug = $slug;
+            """,
+            {"$slug": _utf8(slug)},
+        )
+        if existing is not None:
+            existing_event_id = int(existing.get("event_id") or 0)
+            if existing_event_id == event_id:
+                return
+            raise DuplicateEventSlugError("Slug мероприятия уже используется")
+        existing_slug = self.get_event_slug(event_id)
+        if existing_slug is not None and existing_slug != slug:
+            raise DuplicateEventSlugError("У мероприятия уже есть другой slug")
+        self._execute(
+            """
+            DECLARE $slug AS Utf8;
+            DECLARE $event_id AS Int64;
+            DECLARE $created_at AS Timestamp;
+            INSERT INTO event_deeplinks (slug, event_id, created_at)
+            VALUES ($slug, $event_id, $created_at);
+            """,
+            {
+                "$slug": _utf8(slug),
+                "$event_id": _int(event_id),
+                "$created_at": _timestamp(now or utc_now()),
+            },
+        )
+
+    def get_event_by_slug(self, slug: str) -> Event | None:
+        row = self._one(
+            """
+            DECLARE $slug AS Utf8;
+            SELECT event_id FROM event_deeplinks WHERE slug = $slug;
+            """,
+            {"$slug": _utf8(slug)},
+        )
+        if row is None:
+            return None
+        return self.get_event(int(row.get("event_id") or 0))
+
+    def get_event_slug(self, event_id: int) -> str | None:
+        row = self._one(
+            """
+            DECLARE $event_id AS Int64;
+            SELECT slug FROM event_deeplinks
+            WHERE event_id = $event_id
+            LIMIT 1;
+            """,
+            {"$event_id": _int(event_id)},
+        )
+        if row is None:
+            return None
+        slug = row.get("slug")
+        return str(slug) if slug else None
+
+    def update_event_start(self, event_id: int, starts_at: datetime) -> None:
+        self._require_event(event_id)
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $starts_at AS Timestamp;
+            UPDATE events SET starts_at = $starts_at WHERE id = $id;
+            """,
+            {"$id": _int(event_id), "$starts_at": _timestamp(starts_at)},
+        )
+
+    def reschedule_event(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        starts_at: datetime,
+        *,
+        now: datetime,
+    ) -> Event:
+        self._require_event_access(actor_user_id, event_id)
+        self.update_event_start(event_id, starts_at)
+        self._audit(
+            actor_user_id,
+            "event.rescheduled",
+            "event",
+            str(event_id),
+            {"starts_at": starts_at.isoformat()},
+            now=now,
+        )
+        return self._require_event(event_id)
+
+    def update_event_location(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        location_or_url: str,
+        *,
+        now: datetime,
+    ) -> Event:
+        self._require_event_access(actor_user_id, event_id)
+        clean_location = location_or_url.strip()
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $location_or_url AS Utf8;
+            UPDATE events SET location_or_url = $location_or_url WHERE id = $id;
+            """,
+            {"$id": _int(event_id), "$location_or_url": _utf8(clean_location)},
+        )
+        self._audit(
+            actor_user_id,
+            "event.location_updated",
+            "event",
+            str(event_id),
+            {"location_or_url": clean_location},
+            now=now,
+        )
+        return self._require_event(event_id)
+
+    def create_organizer_event(
+        self,
+        actor_user_id: int,
+        event: Event,
+        *,
+        slots: list[EventSlot],
+        image_token: str | None,
+        image_url: str | None,
+        now: datetime,
+    ) -> Event:
+        self._require_event_creator(actor_user_id)
+        event.booked_count = 0
+        created = self.add_event(event, slots=[_reset_slot_counter(slot) for slot in slots])
+        self.ensure_organizer_event(actor_user_id, created.id)
+        self._set_event_image_without_access_check(
+            actor_user_id,
+            created.id,
+            token=image_token,
+            url=image_url,
+            now=now,
+        )
+        self._audit(actor_user_id, "event.created", "event", str(created.id), now=now)
+        return self._require_event(created.id)
+
+    def replace_organizer_event(
+        self,
+        actor_user_id: int,
+        event: Event,
+        *,
+        slots: list[EventSlot],
+        image_token: str | None,
+        image_url: str | None,
+        now: datetime,
+    ) -> Event:
+        current = self._require_event_access(actor_user_id, event.id)
+        active_registrations = self._active_event_registrations(event.id)
+        if event.capacity_total < len(active_registrations):
+            raise BotDomainError("Лимит мест нельзя сделать меньше числа активных записей")
+        current_slots = self._event_slots(event.id)
+        if active_registrations and not _slots_match_existing(current_slots, slots):
+            raise BotDomainError("У мероприятия уже есть записи, поэтому слоты можно только оставить текущими")
+
+        event.created_at = current.created_at
+        event.booked_count = current.booked_count
+        event.registration_closed = current.registration_closed
+        self._execute(_UPSERT_EVENT, _event_params(event))
+
+        if not active_registrations:
+            self._execute(
+                """
+                DECLARE $event_id AS Int64;
+                DELETE FROM event_slots WHERE event_id = $event_id;
+                """,
+                {"$event_id": _int(event.id)},
+            )
+            for slot in slots:
+                if not slot.id:
+                    slot.id = self._new_id("event_slots")
+                slot.event_id = event.id
+                slot.booked_count = 0
+                self._execute(_UPSERT_SLOT, _slot_params(slot))
+        self._set_event_image_without_access_check(
+            actor_user_id,
+            event.id,
+            token=image_token,
+            url=image_url,
+            now=now,
+        )
+        self._audit(actor_user_id, "event.rebuilt", "event", str(event.id), now=now)
+        return self._require_event(event.id)
+
+    def set_event_image(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        *,
+        token: str | None,
+        url: str | None,
+        now: datetime,
+    ) -> Event:
+        self._require_event_access(actor_user_id, event_id)
+        self._set_event_image_without_access_check(
+            actor_user_id,
+            event_id,
+            token=token,
+            url=url,
+            now=now,
+        )
+        return self._require_event(event_id)
+
+    def set_pending_event_image(
+        self,
+        user_id: int,
+        event_id: int,
+        *,
+        now: datetime,
+    ) -> None:
+        self._require_event_access(user_id, event_id)
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $event_id AS Int64;
+            DECLARE $created_at AS Timestamp;
+            UPSERT INTO pending_event_images (user_id, event_id, created_at)
+            VALUES ($user_id, $event_id, $created_at);
+            """,
+            {
+                "$user_id": _int(user_id),
+                "$event_id": _int(event_id),
+                "$created_at": _timestamp(now),
+            },
+        )
+
+    def get_pending_event_image(self, user_id: int) -> int | None:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT event_id FROM pending_event_images WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        if row is None:
+            return None
+        event_id = row.get("event_id")
+        return int(event_id) if event_id is not None else None
+
+    def clear_pending_event_image(self, user_id: int) -> None:
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DELETE FROM pending_event_images WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+
+    def list_events(self, *, starts_at_from: datetime | None = None) -> list[Event]:
+        if starts_at_from is None:
+            rows = self._query("SELECT * FROM events ORDER BY starts_at;")
+        else:
+            rows = self._query(
+                """
+                DECLARE $starts_at_from AS Timestamp;
+                SELECT * FROM events
+                WHERE starts_at >= $starts_at_from
+                ORDER BY starts_at;
+                """,
+                {"$starts_at_from": _timestamp(starts_at_from)},
+            )
+        events = [_event(row) for row in rows]
+        for event in events:
+            event.slots = self._event_slots(event.id)
+            self._attach_event_image(event)
+        return events
+
+    def available_places(self, event_id: int, slot_id: int | None) -> int:
+        event = self._require_event(event_id)
+        if event.slots:
+            if slot_id is None:
+                return sum(self.available_places(event_id, slot.id) for slot in event.slots)
+            slot = self._require_slot(event, slot_id)
+            return max(slot.capacity - slot.booked_count, 0)
+        return max(event.capacity_total - event.booked_count, 0)
+
+    def create_registration(
+        self,
+        *,
+        user_id: int,
+        event_id: int,
+        slot_id: int | None,
+        now: datetime,
+        code_generator: CodeGenerator,
+        render_reminder: ReminderRenderer,
+    ) -> Registration:
+        current = _dt(now)
+
+        def callee(session):
+            with session.transaction(tx_mode=ydb.QuerySerializableReadWrite()) as tx:
+                if not self._tx_has_consent(tx, user_id):
+                    raise ConsentRequiredError("Нужно согласие на минимальные данные профиля")
+                event = self._tx_event(tx, event_id)
+                if event is None:
+                    raise EventNotFoundError("Мероприятие не найдено")
+                slots = self._tx_event_slots(tx, event_id)
+                event.slots = slots
+                if event.registration_closed or event.starts_at <= current:
+                    raise RegistrationClosedError("Регистрация на мероприятие закрыта")
+                if slots and slot_id is None:
+                    raise SlotRequiredError("Для мероприятия нужно выбрать слот")
+                if slot_id is not None and not any(slot.id == slot_id for slot in slots):
+                    raise SlotNotFoundError("Слот не найден")
+                active_key = self._active_key(user_id, event_id)
+                if self._tx_active_key_exists(tx, active_key):
+                    raise DuplicateActiveRegistrationError("Активная запись уже есть")
+                if self._tx_available_places(event, slots, slot_id) <= 0:
+                    raise NoSeatsAvailableError("Свободных мест нет")
+
+                registration = Registration(
+                    id=self._new_id("registrations"),
+                    code=self._tx_next_unique_code(tx, code_generator),
+                    user_id=user_id,
+                    event_id=event_id,
+                    slot_id=slot_id,
+                    status=RegistrationStatus.CONFIRMED,
+                    notifications_enabled=True,
+                    created_at=current,
+                    updated_at=current,
+                )
+                self._tx_execute(tx, _UPSERT_REGISTRATION, _registration_params(registration))
+                self._tx_execute(
+                    tx,
+                    """
+                    DECLARE $code AS Utf8;
+                    DECLARE $registration_id AS Int64;
+                    INSERT INTO registration_codes (code, registration_id)
+                    VALUES ($code, $registration_id);
+                    """,
+                    {"$code": _utf8(registration.code), "$registration_id": _int(registration.id)},
+                )
+                self._tx_execute(
+                    tx,
+                    """
+                    DECLARE $active_key AS Utf8;
+                    DECLARE $registration_id AS Int64;
+                    INSERT INTO active_registration_keys (active_key, registration_id)
+                    VALUES ($active_key, $registration_id);
+                    """,
+                    {"$active_key": _utf8(active_key), "$registration_id": _int(registration.id)},
+                )
+                if slot_id is None:
+                    self._tx_execute(
+                        tx,
+                        """
+                        DECLARE $id AS Int64;
+                        UPDATE events SET booked_count = booked_count + 1 WHERE id = $id;
+                        """,
+                        {"$id": _int(event_id)},
+                    )
+                else:
+                    self._tx_execute(
+                        tx,
+                        """
+                        DECLARE $id AS Int64;
+                        UPDATE event_slots SET booked_count = booked_count + 1 WHERE id = $id;
+                        """,
+                        {"$id": _int(slot_id)},
+                    )
+                self._tx_schedule_reminders(tx, registration, event, current, render_reminder)
+                self._tx_audit(tx, user_id, "registration.created", "registration", str(registration.id), now=current)
+                self._tx_execute(tx, "SELECT 1;", commit=True)
+                return registration.id
+
+        registration_id = self.pool.retry_operation_sync(
+            callee,
+            retry_settings=ydb.RetrySettings(max_retries=10, idempotent=False),
+        )
+        registration = self.get_registration(registration_id)
+        if registration is None:  # pragma: no cover - defensive edge
+            raise RegistrationNotFoundError("Запись не найдена")
+        return registration
+
+    def cancel_registration(
+        self,
+        *,
+        user_id: int,
+        registration_id: int,
+        now: datetime,
+    ) -> Registration:
+        current = _dt(now)
+
+        def callee(session):
+            with session.transaction(tx_mode=ydb.QuerySerializableReadWrite()) as tx:
+                registration = self._tx_registration(tx, registration_id)
+                if registration is None or registration.user_id != user_id:
+                    raise RegistrationNotFoundError("Запись не найдена")
+                if registration.status not in ACTIVE_REGISTRATION_STATUSES:
+                    self._tx_execute(tx, "SELECT 1;", commit=True)
+                    return registration.id
+                event = self._tx_event(tx, registration.event_id)
+                if event is None:
+                    raise EventNotFoundError("Мероприятие не найдено")
+                if event.starts_at <= current:
+                    if event.late_cancel_policy == LateCancelPolicy.DENY:
+                        raise LateCancellationDeniedError("После начала мероприятия отмена недоступна")
+                    status = RegistrationStatus.LATE_CANCELED
+                else:
+                    status = RegistrationStatus.CANCELED_BY_USER
+                self._tx_update_registration_status(tx, registration, status, current, canceled_at=current)
+                self._tx_remove_active_registration(tx, registration)
+                self._tx_decrease_booked_count(tx, registration)
+                self._tx_audit(tx, user_id, "registration.cancelled", "registration", str(registration.id), now=current)
+                self._tx_execute(tx, "SELECT 1;", commit=True)
+                return registration.id
+
+        result_id = self.pool.retry_operation_sync(callee, retry_settings=ydb.RetrySettings(max_retries=10))
+        registration = self.get_registration(result_id)
+        if registration is None:  # pragma: no cover - defensive edge
+            raise RegistrationNotFoundError("Запись не найдена")
+        return registration
+
+    def set_notifications_enabled(
+        self,
+        *,
+        user_id: int,
+        registration_id: int,
+        enabled: bool,
+        now: datetime,
+    ) -> Registration:
+        registration = self._require_registration(registration_id)
+        if registration.user_id != user_id:
+            raise RegistrationNotFoundError("Запись не найдена")
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $enabled AS Bool;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE registrations
+            SET notifications_enabled = $enabled, updated_at = $updated_at
+            WHERE id = $id;
+            """,
+            {
+                "$id": _int(registration_id),
+                "$enabled": _bool(enabled),
+                "$updated_at": _timestamp(now),
+            },
+        )
+        self._audit(
+            user_id,
+            "registration.notifications_changed",
+            "registration",
+            str(registration_id),
+            {"enabled": enabled},
+            now=now,
+        )
+        return self._require_registration(registration_id)
+
+    def get_registration(self, registration_id: int) -> Registration | None:
+        row = self._one(
+            """
+            DECLARE $id AS Int64;
+            SELECT * FROM registrations WHERE id = $id;
+            """,
+            {"$id": _int(registration_id)},
+        )
+        return self._attach_registration(_registration(row)) if row else None
+
+    def list_user_registrations(self, user_id: int) -> list[Registration]:
+        rows = self._query(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT * FROM registrations
+            WHERE user_id = $user_id
+            ORDER BY created_at DESC;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        return [self._attach_registration(_registration(row)) for row in rows]
+
+    def ensure_role(self, user_id: int, role: str) -> None:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $role AS Utf8;
+            SELECT id FROM role_assignments
+            WHERE user_id = $user_id AND role = $role
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id), "$role": _utf8(role)},
+        )
+        if row is not None:
+            return
+        item = RoleAssignment(id=self._new_id("role_assignments"), user_id=user_id, role=role)
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $user_id AS Int64;
+            DECLARE $role AS Utf8;
+            UPSERT INTO role_assignments (id, user_id, role)
+            VALUES ($id, $user_id, $role);
+            """,
+            _role_params(item),
+        )
+
+    def has_role(self, user_id: int, role: str) -> bool:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $role AS Utf8;
+            SELECT id FROM role_assignments
+            WHERE user_id = $user_id AND role = $role
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id), "$role": _utf8(role)},
+        )
+        return row is not None
+
+    def ensure_organizer_event(self, user_id: int, event_id: int) -> None:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $event_id AS Int64;
+            SELECT id FROM organizer_events
+            WHERE user_id = $user_id AND event_id = $event_id
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id), "$event_id": _int(event_id)},
+        )
+        if row is not None:
+            return
+        item = OrganizerEvent(id=self._new_id("organizer_events"), user_id=user_id, event_id=event_id)
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $user_id AS Int64;
+            DECLARE $event_id AS Int64;
+            UPSERT INTO organizer_events (id, user_id, event_id)
+            VALUES ($id, $user_id, $event_id);
+            """,
+            _organizer_event_params(item),
+        )
+
+    def list_organizer_events(self, actor_user_id: int) -> list[Event]:
+        if self._is_admin(actor_user_id):
+            return self.list_events()
+        rows = self._query(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT event_id FROM organizer_events WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(actor_user_id)},
+        )
+        events = [self.get_event(int(row["event_id"])) for row in rows]
+        return sorted([event for event in events if event is not None], key=lambda item: item.starts_at)
+
+    def set_organizer_state(self, state: OrganizerState) -> OrganizerState:
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $mode AS Utf8;
+            DECLARE $event_id AS Optional<Int64>;
+            DECLARE $step AS Utf8;
+            DECLARE $data_json AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPSERT INTO organizer_states (
+                user_id, mode, event_id, step, data_json, updated_at
+            ) VALUES (
+                $user_id, $mode, $event_id, $step, $data_json, $updated_at
+            );
+            """,
+            _organizer_state_params(state),
+        )
+        return state
+
+    def get_organizer_state(self, user_id: int) -> OrganizerState | None:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT * FROM organizer_states WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        if row is None:
+            return None
+        return _organizer_state(row)
+
+    def clear_organizer_state(self, user_id: int) -> None:
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DELETE FROM organizer_states WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+
+    def get_event_registrations(
+        self,
+        actor_user_id: int,
+        event_id: int,
+    ) -> list[Registration]:
+        self._require_event_access(actor_user_id, event_id)
+        rows = self._query(
+            """
+            DECLARE $event_id AS Int64;
+            SELECT * FROM registrations
+            WHERE event_id = $event_id
+            ORDER BY created_at DESC;
+            """,
+            {"$event_id": _int(event_id)},
+        )
+        return [self._attach_registration(_registration(row)) for row in rows]
+
+    def find_registration_by_code(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        code: str,
+    ) -> Registration:
+        self._require_event_access(actor_user_id, event_id)
+        row = self._one(
+            """
+            DECLARE $event_id AS Int64;
+            DECLARE $code AS Utf8;
+            SELECT * FROM registrations
+            WHERE event_id = $event_id AND code = $code
+            LIMIT 1;
+            """,
+            {"$event_id": _int(event_id), "$code": _utf8(code.strip().upper())},
+        )
+        if row is None:
+            raise RegistrationNotFoundError("Запись не найдена")
+        return self._attach_registration(_registration(row))
+
+    def find_registration_by_code_any_event(
+        self,
+        actor_user_id: int,
+        code: str,
+    ) -> Registration:
+        event_ids = {event.id for event in self.list_organizer_events(actor_user_id)}
+        if not event_ids:
+            raise AccessDeniedError("Нет доступных мероприятий")
+        registration = self.find_registration_by_code_global(code)
+        if registration is None or registration.event_id not in event_ids:
+            raise RegistrationNotFoundError("Запись не найдена")
+        return registration
+
+    def find_registration_by_code_global(self, code: str) -> Registration | None:
+        row = self._one(
+            """
+            DECLARE $code AS Utf8;
+            SELECT registration_id FROM registration_codes WHERE code = $code;
+            """,
+            {"$code": _utf8(code.strip().upper())},
+        )
+        if row is None:
+            return None
+        return self.get_registration(int(row["registration_id"]))
+
+    def close_registration(self, actor_user_id: int, event_id: int) -> Event:
+        self._require_event_access(actor_user_id, event_id)
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            UPDATE events SET registration_closed = true WHERE id = $id;
+            """,
+            {"$id": _int(event_id)},
+        )
+        self._audit(actor_user_id, "event.registration_closed", "event", str(event_id), now=utc_now())
+        return self._require_event(event_id)
+
+    def mark_attended(
+        self,
+        actor_user_id: int,
+        registration_id: int,
+        *,
+        now: datetime,
+    ) -> Registration:
+        registration = self._get_registration_for_actor(actor_user_id, registration_id)
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $status AS Utf8;
+            DECLARE $attended_at AS Timestamp;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE registrations
+            SET status = $status, attended_at = $attended_at, updated_at = $updated_at
+            WHERE id = $id;
+            """,
+            {
+                "$id": _int(registration.id),
+                "$status": _utf8(RegistrationStatus.ATTENDED.value),
+                "$attended_at": _timestamp(now),
+                "$updated_at": _timestamp(now),
+            },
+        )
+        self._audit(actor_user_id, "registration.attended", "registration", str(registration_id), now=now)
+        return self._require_registration(registration_id)
+
+    def change_status(
+        self,
+        actor_user_id: int,
+        registration_id: int,
+        status: RegistrationStatus,
+        *,
+        now: datetime,
+    ) -> Registration:
+        current = _dt(now)
+
+        def callee(session):
+            with session.transaction(tx_mode=ydb.QuerySerializableReadWrite()) as tx:
+                registration = self._tx_registration(tx, registration_id)
+                if registration is None:
+                    raise RegistrationNotFoundError("Запись не найдена")
+                if not self._tx_has_event_access(tx, actor_user_id, registration.event_id):
+                    raise AccessDeniedError("Нет доступа к этому мероприятию")
+                was_active = registration.status in ACTIVE_REGISTRATION_STATUSES
+                canceled_at = current if status not in ACTIVE_REGISTRATION_STATUSES else registration.canceled_at
+                self._tx_update_registration_status(tx, registration, status, current, canceled_at=canceled_at)
+                if was_active and status not in ACTIVE_REGISTRATION_STATUSES:
+                    self._tx_remove_active_registration(tx, registration)
+                    self._tx_decrease_booked_count(tx, registration)
+                self._tx_audit(
+                    tx,
+                    actor_user_id,
+                    "registration.status_changed",
+                    "registration",
+                    str(registration_id),
+                    {"status": status.value},
+                    now=current,
+                )
+                self._tx_execute(tx, "SELECT 1;", commit=True)
+                return registration_id
+
+        self.pool.retry_operation_sync(callee, retry_settings=ydb.RetrySettings(max_retries=10))
+        return self._require_registration(registration_id)
+
+    def enqueue_manual_notification(
+        self,
+        *,
+        actor_user_id: int,
+        event_id: int,
+        kind: NotificationKind,
+        message_text: str,
+        now: datetime,
+    ) -> list[NotificationOutbox]:
+        if kind not in MANUAL_NOTIFICATION_KINDS:
+            raise InvalidNotificationKindError("Этот тип уведомления нельзя отправить вручную")
+        self._require_event_access(actor_user_id, event_id)
+        rows = self._query(
+            """
+            DECLARE $event_id AS Int64;
+            SELECT * FROM registrations
+            WHERE event_id = $event_id AND notifications_enabled = true;
+            """,
+            {"$event_id": _int(event_id)},
+        )
+        created: list[NotificationOutbox] = []
+        for registration in (_registration(row) for row in rows):
+            if registration.status not in ACTIVE_REGISTRATION_STATUSES:
+                continue
+            created.append(
+                self.add_notification(
+                    NotificationOutbox(
+                        id=0,
+                        event_id=event_id,
+                        registration_id=registration.id,
+                        user_id=registration.user_id,
+                        kind=kind,
+                        message_text=message_text,
+                        send_after=now,
+                        created_at=now,
+                    )
+                )
+            )
+        self._audit(
+            actor_user_id,
+            "event.notification_enqueued",
+            "event",
+            str(event_id),
+            {"kind": kind.value, "count": len(created)},
+            now=now,
+        )
+        return created
+
+    def add_notification(self, item: NotificationOutbox) -> NotificationOutbox:
+        if not item.id:
+            item.id = self._new_id("notification_outbox")
+        self._execute(_UPSERT_NOTIFICATION, _notification_params(item))
+        return item
+
+    def list_notifications(self) -> list[NotificationOutbox]:
+        rows = self._query("SELECT * FROM notification_outbox ORDER BY id;")
+        return [self._attach_notification(_notification(row)) for row in rows]
+
+    def list_due_notifications(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> list[NotificationOutbox]:
+        rows = self._query(
+            """
+            DECLARE $now AS Timestamp;
+            DECLARE $limit AS Uint64;
+            SELECT * FROM notification_outbox
+            WHERE status = "pending" AND send_after <= $now
+            ORDER BY send_after, id
+            LIMIT $limit;
+            """,
+            {"$now": _timestamp(now), "$limit": _uint64(limit)},
+        )
+        return [self._attach_notification(_notification(row)) for row in rows]
+
+    def set_notification_result(
+        self,
+        notification_id: int,
+        *,
+        status: OutboxStatus,
+        now: datetime,
+        error: str | None = None,
+    ) -> None:
+        item = self._one(
+            """
+            DECLARE $id AS Int64;
+            SELECT attempts, last_error, sent_at FROM notification_outbox WHERE id = $id;
+            """,
+            {"$id": _int(notification_id)},
+        )
+        if item is None:
+            return
+        attempts = int(item.get("attempts") or 0) + 1
+        sent_at = _dt(now) if status == OutboxStatus.SENT else _row_dt(item, "sent_at")
+        last_error = None if status == OutboxStatus.SENT else item.get("last_error")
+        if status == OutboxStatus.FAILED:
+            last_error = (error or "")[:1000]
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DECLARE $status AS Utf8;
+            DECLARE $attempts AS Int64;
+            DECLARE $last_error AS Optional<Utf8>;
+            DECLARE $sent_at AS Optional<Timestamp>;
+            UPDATE notification_outbox
+            SET status = $status,
+                attempts = $attempts,
+                last_error = $last_error,
+                sent_at = $sent_at
+            WHERE id = $id;
+            """,
+            {
+                "$id": _int(notification_id),
+                "$status": _utf8(status.value),
+                "$attempts": _int(attempts),
+                "$last_error": _opt_utf8(last_error),
+                "$sent_at": _opt_timestamp(sent_at),
+            },
+        )
+
+    def import_snapshot(self, snapshot) -> None:
+        for user in snapshot.users:
+            self._execute(
+                """
+                DECLARE $user_id AS Int64;
+                DECLARE $display_name AS Utf8;
+                DECLARE $is_bot AS Bool;
+                DECLARE $created_at AS Timestamp;
+                DECLARE $updated_at AS Timestamp;
+                UPSERT INTO users (user_id, display_name, is_bot, created_at, updated_at)
+                VALUES ($user_id, $display_name, $is_bot, $created_at, $updated_at);
+                """,
+                _user_params(user),
+            )
+        for event in snapshot.events:
+            event.booked_count = 0
+            self.add_event(
+                event,
+                slots=[
+                    _reset_slot_counter(slot)
+                    for slot in snapshot.slots
+                    if slot.event_id == event.id
+                ],
+            )
+        for consent in snapshot.consents:
+            self._execute(
+                """
+                DECLARE $id AS Int64;
+                DECLARE $user_id AS Int64;
+                DECLARE $document_version AS Utf8;
+                DECLARE $profile_data_allowed AS Bool;
+                DECLARE $created_at AS Timestamp;
+                UPSERT INTO consents (id, user_id, document_version, profile_data_allowed, created_at)
+                VALUES ($id, $user_id, $document_version, $profile_data_allowed, $created_at);
+                """,
+                _consent_params(consent),
+            )
+        for role in snapshot.roles:
+            self._execute(
+                """
+                DECLARE $id AS Int64;
+                DECLARE $user_id AS Int64;
+                DECLARE $role AS Utf8;
+                UPSERT INTO role_assignments (id, user_id, role)
+                VALUES ($id, $user_id, $role);
+                """,
+                _role_params(role),
+            )
+        for organizer_event in snapshot.organizer_events:
+            self._execute(
+                """
+                DECLARE $id AS Int64;
+                DECLARE $user_id AS Int64;
+                DECLARE $event_id AS Int64;
+                UPSERT INTO organizer_events (id, user_id, event_id)
+                VALUES ($id, $user_id, $event_id);
+                """,
+                _organizer_event_params(organizer_event),
+            )
+        for registration in snapshot.registrations:
+            self._execute(_UPSERT_REGISTRATION, _registration_params(registration))
+            self._execute(
+                """
+                DECLARE $code AS Utf8;
+                DECLARE $registration_id AS Int64;
+                UPSERT INTO registration_codes (code, registration_id)
+                VALUES ($code, $registration_id);
+                """,
+                {"$code": _utf8(registration.code), "$registration_id": _int(registration.id)},
+            )
+            if registration.status in ACTIVE_REGISTRATION_STATUSES:
+                self._execute(
+                    """
+                    DECLARE $active_key AS Utf8;
+                    DECLARE $registration_id AS Int64;
+                    UPSERT INTO active_registration_keys (active_key, registration_id)
+                    VALUES ($active_key, $registration_id);
+                    """,
+                    {
+                        "$active_key": _utf8(self._active_key(registration.user_id, registration.event_id)),
+                        "$registration_id": _int(registration.id),
+                    },
+                )
+                if registration.slot_id is None:
+                    self._execute(
+                        """
+                        DECLARE $id AS Int64;
+                        UPDATE events SET booked_count = booked_count + 1 WHERE id = $id;
+                        """,
+                        {"$id": _int(registration.event_id)},
+                    )
+                else:
+                    self._execute(
+                        """
+                        DECLARE $id AS Int64;
+                        UPDATE event_slots SET booked_count = booked_count + 1 WHERE id = $id;
+                        """,
+                        {"$id": _int(registration.slot_id)},
+                    )
+        for notification in snapshot.notifications:
+            self.add_notification(notification)
+        for audit in snapshot.audit_logs:
+            self._execute(_UPSERT_AUDIT, _audit_params(audit))
+
+    def _require_event(self, event_id: int) -> Event:
+        event = self.get_event(event_id)
+        if event is None:
+            raise EventNotFoundError("Мероприятие не найдено")
+        return event
+
+    def _require_slot(self, event: Event, slot_id: int) -> EventSlot:
+        for slot in event.slots:
+            if slot.id == slot_id:
+                return slot
+        raise SlotNotFoundError("Слот не найден")
+
+    def _require_registration(self, registration_id: int) -> Registration:
+        registration = self.get_registration(registration_id)
+        if registration is None:
+            raise RegistrationNotFoundError("Запись не найдена")
+        return registration
+
+    def _require_event_access(self, user_id: int, event_id: int) -> Event:
+        event = self._require_event(event_id)
+        if not self._has_event_access(user_id, event_id):
+            raise AccessDeniedError("Нет доступа к этому мероприятию")
+        return event
+
+    def _require_event_creator(self, user_id: int) -> None:
+        if self._is_admin(user_id) or self.has_role(user_id, "organizer"):
+            return
+        raise AccessDeniedError("Нет доступа к созданию мероприятий")
+
+    def _active_event_registrations(self, event_id: int) -> list[Registration]:
+        rows = self._query(
+            """
+            DECLARE $event_id AS Int64;
+            DECLARE $confirmed AS Utf8;
+            DECLARE $attended AS Utf8;
+            SELECT * FROM registrations
+            WHERE event_id = $event_id AND (status = $confirmed OR status = $attended);
+            """,
+            {
+                "$event_id": _int(event_id),
+                "$confirmed": _utf8(RegistrationStatus.CONFIRMED.value),
+                "$attended": _utf8(RegistrationStatus.ATTENDED.value),
+            },
+        )
+        return [_registration(row) for row in rows]
+
+    def _set_event_image_without_access_check(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        *,
+        token: str | None,
+        url: str | None,
+        now: datetime,
+    ) -> None:
+        clean_token = (token or "").strip() or None
+        clean_url = (url or "").strip() or None
+        self._execute(
+            """
+            DECLARE $event_id AS Int64;
+            DECLARE $token AS Optional<Utf8>;
+            DECLARE $url AS Optional<Utf8>;
+            DECLARE $updated_by_user_id AS Int64;
+            DECLARE $updated_at AS Timestamp;
+            UPSERT INTO event_images (
+                event_id, token, url, updated_by_user_id, updated_at
+            ) VALUES (
+                $event_id, $token, $url, $updated_by_user_id, $updated_at
+            );
+            """,
+            {
+                "$event_id": _int(event_id),
+                "$token": _opt_utf8(clean_token),
+                "$url": _opt_utf8(clean_url),
+                "$updated_by_user_id": _int(actor_user_id),
+                "$updated_at": _timestamp(now),
+            },
+        )
+        self._audit(
+            actor_user_id,
+            "event.image_updated",
+            "event",
+            str(event_id),
+            {"has_token": clean_token is not None, "has_url": clean_url is not None},
+            now=now,
+        )
+
+    def _get_registration_for_actor(self, actor_user_id: int, registration_id: int) -> Registration:
+        registration = self._require_registration(registration_id)
+        self._require_event_access(actor_user_id, registration.event_id)
+        return registration
+
+    def _is_admin(self, user_id: int) -> bool:
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT id FROM role_assignments
+            WHERE user_id = $user_id AND role = "admin"
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        return row is not None
+
+    def _has_event_access(self, user_id: int, event_id: int) -> bool:
+        if self._is_admin(user_id):
+            return True
+        row = self._one(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $event_id AS Int64;
+            SELECT id FROM organizer_events
+            WHERE user_id = $user_id AND event_id = $event_id
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id), "$event_id": _int(event_id)},
+        )
+        return row is not None
+
+    def _event_slots(self, event_id: int) -> list[EventSlot]:
+        rows = self._query(
+            """
+            DECLARE $event_id AS Int64;
+            SELECT * FROM event_slots
+            WHERE event_id = $event_id
+            ORDER BY starts_at;
+            """,
+            {"$event_id": _int(event_id)},
+        )
+        return [_slot(row) for row in rows]
+
+    def _attach_registration(self, registration: Registration) -> Registration:
+        registration.event = self.get_event(registration.event_id)
+        registration.slot = self._get_slot(registration.slot_id) if registration.slot_id else None
+        registration.user = self.get_user(registration.user_id)
+        return registration
+
+    def _attach_event_image(self, event: Event) -> Event:
+        row = self._one(
+            """
+            DECLARE $event_id AS Int64;
+            SELECT token, url FROM event_images WHERE event_id = $event_id;
+            """,
+            {"$event_id": _int(event.id)},
+        )
+        if row is None:
+            event.image_token = None
+            event.image_url = None
+            return event
+        token = row.get("token")
+        url = row.get("url")
+        event.image_token = str(token) if token else None
+        event.image_url = str(url) if url else None
+        return event
+
+    def _attach_notification(self, item: NotificationOutbox) -> NotificationOutbox:
+        if item.registration_id is not None:
+            item.registration = self.get_registration(item.registration_id)
+        return item
+
+    def _get_slot(self, slot_id: int | None) -> EventSlot | None:
+        if slot_id is None:
+            return None
+        row = self._one(
+            """
+            DECLARE $id AS Int64;
+            SELECT * FROM event_slots WHERE id = $id;
+            """,
+            {"$id": _int(slot_id)},
+        )
+        return _slot(row) if row else None
+
+    def _new_id(self, table_name: str) -> int:
+        for _ in range(20):
+            value = secrets.randbits(62)
+            row = self._one(
+                f"""
+                DECLARE $id AS Int64;
+                SELECT id FROM {table_name} WHERE id = $id;
+                """,
+                {"$id": _int(value)},
+            )
+            if row is None:
+                return value
+        raise RuntimeError("Не удалось сгенерировать идентификатор")
+
+    def _query(self, query: str, params: dict | None = None):
+        result_sets = self.pool.execute_with_retries(
+            query,
+            params,
+            retry_settings=ydb.RetrySettings(idempotent=True),
+        )
+        return _rows(result_sets)
+
+    def _one(self, query: str, params: dict | None = None):
+        rows = self._query(query, params)
+        return rows[0] if rows else None
+
+    def _execute(self, query: str, params: dict | None = None) -> None:
+        self.pool.execute_with_retries(
+            query,
+            params,
+            retry_settings=ydb.RetrySettings(max_retries=10, idempotent=True),
+        )
+
+    def _tx_execute(self, tx, query: str, params: dict | None = None, *, commit: bool = False):
+        with tx.execute(query, params, commit_tx=commit) as result_sets:
+            return _rows(result_sets)
+
+    def _tx_one(self, tx, query: str, params: dict | None = None):
+        rows = self._tx_execute(tx, query, params)
+        return rows[0] if rows else None
+
+    def _tx_has_consent(self, tx, user_id: int) -> bool:
+        return self._tx_one(
+            tx,
+            """
+            DECLARE $user_id AS Int64;
+            SELECT id FROM consents
+            WHERE user_id = $user_id AND profile_data_allowed = true
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id)},
+        ) is not None
+
+    def _tx_event(self, tx, event_id: int) -> Event | None:
+        row = self._tx_one(
+            tx,
+            """
+            DECLARE $id AS Int64;
+            SELECT * FROM events WHERE id = $id;
+            """,
+            {"$id": _int(event_id)},
+        )
+        return _event(row) if row else None
+
+    def _tx_event_slots(self, tx, event_id: int) -> list[EventSlot]:
+        rows = self._tx_execute(
+            tx,
+            """
+            DECLARE $event_id AS Int64;
+            SELECT * FROM event_slots
+            WHERE event_id = $event_id
+            ORDER BY starts_at;
+            """,
+            {"$event_id": _int(event_id)},
+        )
+        return [_slot(row) for row in rows]
+
+    def _tx_registration(self, tx, registration_id: int) -> Registration | None:
+        row = self._tx_one(
+            tx,
+            """
+            DECLARE $id AS Int64;
+            SELECT * FROM registrations WHERE id = $id;
+            """,
+            {"$id": _int(registration_id)},
+        )
+        return _registration(row) if row else None
+
+    def _tx_has_event_access(self, tx, user_id: int, event_id: int) -> bool:
+        if self._tx_one(
+            tx,
+            """
+            DECLARE $user_id AS Int64;
+            SELECT id FROM role_assignments
+            WHERE user_id = $user_id AND role = "admin"
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id)},
+        ):
+            return True
+        return self._tx_one(
+            tx,
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $event_id AS Int64;
+            SELECT id FROM organizer_events
+            WHERE user_id = $user_id AND event_id = $event_id
+            LIMIT 1;
+            """,
+            {"$user_id": _int(user_id), "$event_id": _int(event_id)},
+        ) is not None
+
+    def _tx_active_key_exists(self, tx, active_key: str) -> bool:
+        return self._tx_one(
+            tx,
+            """
+            DECLARE $active_key AS Utf8;
+            SELECT registration_id FROM active_registration_keys WHERE active_key = $active_key;
+            """,
+            {"$active_key": _utf8(active_key)},
+        ) is not None
+
+    def _tx_next_unique_code(self, tx, code_generator: CodeGenerator) -> str:
+        for _ in range(20):
+            code = code_generator().strip().upper()
+            if not code:
+                continue
+            exists = self._tx_one(
+                tx,
+                """
+                DECLARE $code AS Utf8;
+                SELECT registration_id FROM registration_codes WHERE code = $code;
+                """,
+                {"$code": _utf8(code)},
+            )
+            if exists is None:
+                return code
+        raise RuntimeError("Не удалось сгенерировать уникальный код записи")
+
+    def _tx_update_registration_status(
+        self,
+        tx,
+        registration: Registration,
+        status: RegistrationStatus,
+        updated_at: datetime,
+        *,
+        canceled_at: datetime | None,
+    ) -> None:
+        self._tx_execute(
+            tx,
+            """
+            DECLARE $id AS Int64;
+            DECLARE $status AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            DECLARE $canceled_at AS Optional<Timestamp>;
+            UPDATE registrations
+            SET status = $status, updated_at = $updated_at, canceled_at = $canceled_at
+            WHERE id = $id;
+            """,
+            {
+                "$id": _int(registration.id),
+                "$status": _utf8(status.value),
+                "$updated_at": _timestamp(updated_at),
+                "$canceled_at": _opt_timestamp(canceled_at),
+            },
+        )
+
+    def _tx_remove_active_registration(self, tx, registration: Registration) -> None:
+        self._tx_execute(
+            tx,
+            """
+            DECLARE $active_key AS Utf8;
+            DELETE FROM active_registration_keys WHERE active_key = $active_key;
+            """,
+            {"$active_key": _utf8(self._active_key(registration.user_id, registration.event_id))},
+        )
+
+    def _tx_decrease_booked_count(self, tx, registration: Registration) -> None:
+        if registration.slot_id is None:
+            self._tx_execute(
+                tx,
+                """
+                DECLARE $id AS Int64;
+                UPDATE events
+                SET booked_count = CASE WHEN booked_count > 0 THEN booked_count - 1 ELSE 0 END
+                WHERE id = $id;
+                """,
+                {"$id": _int(registration.event_id)},
+            )
+        else:
+            self._tx_execute(
+                tx,
+                """
+                DECLARE $id AS Int64;
+                UPDATE event_slots
+                SET booked_count = CASE WHEN booked_count > 0 THEN booked_count - 1 ELSE 0 END
+                WHERE id = $id;
+                """,
+                {"$id": _int(registration.slot_id)},
+            )
+
+    def _tx_schedule_reminders(
+        self,
+        tx,
+        registration: Registration,
+        event: Event,
+        now: datetime,
+        render_reminder: ReminderRenderer,
+    ) -> None:
+        reminders = [
+            (NotificationKind.REMINDER_24H, event.starts_at - timedelta(days=1)),
+            (NotificationKind.REMINDER_1H, event.starts_at - timedelta(hours=1)),
+        ]
+        for kind, send_after in reminders:
+            if send_after <= now:
+                continue
+            item = NotificationOutbox(
+                id=self._new_id("notification_outbox"),
+                event_id=event.id,
+                registration_id=registration.id,
+                user_id=registration.user_id,
+                kind=kind,
+                message_text=render_reminder(kind, event, registration),
+                send_after=send_after,
+                created_at=now,
+            )
+            self._tx_execute(tx, _UPSERT_NOTIFICATION, _notification_params(item))
+
+    def _tx_audit(
+        self,
+        tx,
+        actor_user_id: int | None,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+        metadata: dict | None = None,
+        *,
+        now: datetime,
+    ) -> None:
+        item = AuditLog(
+            id=self._new_id("audit_log"),
+            actor_user_id=actor_user_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            metadata_json=metadata or {},
+            created_at=now,
+        )
+        self._tx_execute(tx, _UPSERT_AUDIT, _audit_params(item))
+
+    def _audit(
+        self,
+        actor_user_id: int | None,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+        metadata: dict | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        item = AuditLog(
+            id=self._new_id("audit_log"),
+            actor_user_id=actor_user_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            metadata_json=metadata or {},
+            created_at=_dt(now or utc_now()),
+        )
+        self._execute(_UPSERT_AUDIT, _audit_params(item))
+
+    @staticmethod
+    def _tx_available_places(event: Event, slots: list[EventSlot], slot_id: int | None) -> int:
+        if slots:
+            if slot_id is None:
+                return sum(max(slot.capacity - slot.booked_count, 0) for slot in slots)
+            slot = next(slot for slot in slots if slot.id == slot_id)
+            return max(slot.capacity - slot.booked_count, 0)
+        return max(event.capacity_total - event.booked_count, 0)
+
+    @staticmethod
+    def _active_key(user_id: int, event_id: int) -> str:
+        return f"{user_id}:{event_id}"
+
+    @staticmethod
+    def _credentials(use_metadata_credentials: bool):
+        if os.getenv("YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS") or os.getenv("YDB_ACCESS_TOKEN_CREDENTIALS"):
+            return ydb.credentials_from_env_variables()
+        if use_metadata_credentials:
+            os.environ["YDB_METADATA_CREDENTIALS"] = "1"
+            return ydb.credentials_from_env_variables()
+        return ydb.AnonymousCredentials()
+
+
+_UPSERT_EVENT = """
+DECLARE $id AS Int64;
+DECLARE $title AS Utf8;
+DECLARE $description AS Utf8;
+DECLARE $requirements AS Utf8;
+DECLARE $starts_at AS Timestamp;
+DECLARE $duration_minutes AS Int64;
+DECLARE $format AS Utf8;
+DECLARE $location_or_url AS Utf8;
+DECLARE $cancellation_policy_text AS Utf8;
+DECLARE $capacity_total AS Int64;
+DECLARE $registration_closed AS Bool;
+DECLARE $late_cancel_policy AS Utf8;
+DECLARE $created_at AS Timestamp;
+DECLARE $booked_count AS Int64;
+UPSERT INTO events (
+    id, title, description, requirements, starts_at, duration_minutes, format,
+    location_or_url, cancellation_policy_text, capacity_total, registration_closed,
+    late_cancel_policy, created_at, booked_count
+) VALUES (
+    $id, $title, $description, $requirements, $starts_at, $duration_minutes, $format,
+    $location_or_url, $cancellation_policy_text, $capacity_total, $registration_closed,
+    $late_cancel_policy, $created_at, $booked_count
+);
+"""
+
+_UPSERT_SLOT = """
+DECLARE $id AS Int64;
+DECLARE $event_id AS Int64;
+DECLARE $title AS Utf8;
+DECLARE $starts_at AS Timestamp;
+DECLARE $ends_at AS Timestamp;
+DECLARE $capacity AS Int64;
+DECLARE $booked_count AS Int64;
+UPSERT INTO event_slots (id, event_id, title, starts_at, ends_at, capacity, booked_count)
+VALUES ($id, $event_id, $title, $starts_at, $ends_at, $capacity, $booked_count);
+"""
+
+_UPSERT_REGISTRATION = """
+DECLARE $id AS Int64;
+DECLARE $code AS Utf8;
+DECLARE $user_id AS Int64;
+DECLARE $event_id AS Int64;
+DECLARE $slot_id AS Optional<Int64>;
+DECLARE $status AS Utf8;
+DECLARE $notifications_enabled AS Bool;
+DECLARE $created_at AS Timestamp;
+DECLARE $updated_at AS Timestamp;
+DECLARE $canceled_at AS Optional<Timestamp>;
+DECLARE $attended_at AS Optional<Timestamp>;
+UPSERT INTO registrations (
+    id, code, user_id, event_id, slot_id, status, notifications_enabled,
+    created_at, updated_at, canceled_at, attended_at
+) VALUES (
+    $id, $code, $user_id, $event_id, $slot_id, $status, $notifications_enabled,
+    $created_at, $updated_at, $canceled_at, $attended_at
+);
+"""
+
+_UPSERT_NOTIFICATION = """
+DECLARE $id AS Int64;
+DECLARE $event_id AS Int64;
+DECLARE $registration_id AS Optional<Int64>;
+DECLARE $user_id AS Int64;
+DECLARE $kind AS Utf8;
+DECLARE $message_text AS Utf8;
+DECLARE $send_after AS Timestamp;
+DECLARE $status AS Utf8;
+DECLARE $attempts AS Int64;
+DECLARE $last_error AS Optional<Utf8>;
+DECLARE $created_at AS Timestamp;
+DECLARE $sent_at AS Optional<Timestamp>;
+UPSERT INTO notification_outbox (
+    id, event_id, registration_id, user_id, kind, message_text, send_after,
+    status, attempts, last_error, created_at, sent_at
+) VALUES (
+    $id, $event_id, $registration_id, $user_id, $kind, $message_text, $send_after,
+    $status, $attempts, $last_error, $created_at, $sent_at
+);
+"""
+
+_UPSERT_AUDIT = """
+DECLARE $id AS Int64;
+DECLARE $actor_user_id AS Optional<Int64>;
+DECLARE $action AS Utf8;
+DECLARE $entity_type AS Utf8;
+DECLARE $entity_id AS Utf8;
+DECLARE $metadata_json AS Utf8;
+DECLARE $created_at AS Timestamp;
+UPSERT INTO audit_log (id, actor_user_id, action, entity_type, entity_id, metadata_json, created_at)
+VALUES ($id, $actor_user_id, $action, $entity_type, $entity_id, $metadata_json, $created_at);
+"""
+
+
+def _rows(result_sets) -> list:
+    if not result_sets:
+        return []
+    if isinstance(result_sets, (list, tuple)):
+        first = result_sets[0]
+    else:
+        first = next(iter(result_sets), None)
+        if first is None:
+            return []
+    return list(getattr(first, "rows", []) or [])
+
+
+def _dt(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _row_dt(row, name: str) -> datetime | None:
+    value = row.get(name)
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _dt(value)
+    return value
+
+
+def _int(value: int) -> ydb.TypedValue:
+    return ydb.TypedValue(int(value), ydb.PrimitiveType.Int64)
+
+
+def _uint64(value: int) -> ydb.TypedValue:
+    return ydb.TypedValue(int(value), ydb.PrimitiveType.Uint64)
+
+
+def _opt_int(value: int | None) -> ydb.TypedValue:
+    return ydb.TypedValue(None if value is None else int(value), ydb.OptionalType(ydb.PrimitiveType.Int64))
+
+
+def _utf8(value: str) -> ydb.TypedValue:
+    return ydb.TypedValue(str(value or ""), ydb.PrimitiveType.Utf8)
+
+
+def _opt_utf8(value: str | None) -> ydb.TypedValue:
+    return ydb.TypedValue(value, ydb.OptionalType(ydb.PrimitiveType.Utf8))
+
+
+def _bool(value: bool) -> ydb.TypedValue:
+    return ydb.TypedValue(bool(value), ydb.PrimitiveType.Bool)
+
+
+def _timestamp(value: datetime) -> ydb.TypedValue:
+    return ydb.TypedValue(_dt(value), ydb.PrimitiveType.Timestamp)
+
+
+def _opt_timestamp(value: datetime | None) -> ydb.TypedValue:
+    return ydb.TypedValue(_dt(value) if value else None, ydb.OptionalType(ydb.PrimitiveType.Timestamp))
+
+
+def _user(row) -> User:
+    return User(
+        user_id=int(row["user_id"]),
+        display_name=row.get("display_name") or "",
+        is_bot=bool(row.get("is_bot") or False),
+        created_at=_row_dt(row, "created_at") or utc_now(),
+        updated_at=_row_dt(row, "updated_at") or utc_now(),
+    )
+
+
+def _event(row) -> Event:
+    return Event(
+        id=int(row["id"]),
+        title=row.get("title") or "",
+        description=row.get("description") or "",
+        requirements=row.get("requirements") or "",
+        starts_at=_row_dt(row, "starts_at") or utc_now(),
+        duration_minutes=int(row.get("duration_minutes") or 0),
+        format=EventFormat(row.get("format") or EventFormat.IN_PERSON.value),
+        location_or_url=row.get("location_or_url") or "",
+        cancellation_policy_text=row.get("cancellation_policy_text") or "",
+        capacity_total=int(row.get("capacity_total") or 0),
+        registration_closed=bool(row.get("registration_closed") or False),
+        late_cancel_policy=LateCancelPolicy(row.get("late_cancel_policy") or LateCancelPolicy.DENY.value),
+        created_at=_row_dt(row, "created_at") or utc_now(),
+        booked_count=int(row.get("booked_count") or 0),
+    )
+
+
+def _slot(row) -> EventSlot:
+    return EventSlot(
+        id=int(row["id"]),
+        event_id=int(row.get("event_id") or 0),
+        title=row.get("title") or "",
+        starts_at=_row_dt(row, "starts_at") or utc_now(),
+        ends_at=_row_dt(row, "ends_at") or utc_now(),
+        capacity=int(row.get("capacity") or 0),
+        booked_count=int(row.get("booked_count") or 0),
+    )
+
+
+def _organizer_state(row) -> OrganizerState:
+    raw_data = row.get("data_json") or "{}"
+    try:
+        data = json.loads(raw_data)
+    except json.JSONDecodeError:
+        data = {}
+    return OrganizerState(
+        user_id=int(row["user_id"]),
+        mode=row.get("mode") or "",
+        event_id=row.get("event_id"),
+        step=row.get("step") or "",
+        data=data if isinstance(data, dict) else {},
+        updated_at=_row_dt(row, "updated_at") or utc_now(),
+    )
+
+
+def _registration(row) -> Registration:
+    return Registration(
+        id=int(row["id"]),
+        code=row.get("code") or "",
+        user_id=int(row.get("user_id") or 0),
+        event_id=int(row.get("event_id") or 0),
+        slot_id=row.get("slot_id"),
+        status=RegistrationStatus(row.get("status") or RegistrationStatus.CONFIRMED.value),
+        notifications_enabled=bool(row.get("notifications_enabled") if row.get("notifications_enabled") is not None else True),
+        created_at=_row_dt(row, "created_at") or utc_now(),
+        updated_at=_row_dt(row, "updated_at") or utc_now(),
+        canceled_at=_row_dt(row, "canceled_at"),
+        attended_at=_row_dt(row, "attended_at"),
+    )
+
+
+def _notification(row) -> NotificationOutbox:
+    return NotificationOutbox(
+        id=int(row["id"]),
+        event_id=int(row.get("event_id") or 0),
+        registration_id=row.get("registration_id"),
+        user_id=int(row.get("user_id") or 0),
+        kind=NotificationKind(row.get("kind") or NotificationKind.REMINDER_1H.value),
+        message_text=row.get("message_text") or "",
+        send_after=_row_dt(row, "send_after") or utc_now(),
+        status=OutboxStatus(row.get("status") or OutboxStatus.PENDING.value),
+        attempts=int(row.get("attempts") or 0),
+        last_error=row.get("last_error"),
+        created_at=_row_dt(row, "created_at") or utc_now(),
+        sent_at=_row_dt(row, "sent_at"),
+    )
+
+
+def _user_params(user: User) -> dict:
+    return {
+        "$user_id": _int(user.user_id),
+        "$display_name": _utf8(user.display_name),
+        "$is_bot": _bool(user.is_bot),
+        "$created_at": _timestamp(user.created_at),
+        "$updated_at": _timestamp(user.updated_at),
+    }
+
+
+def _consent_params(consent: Consent) -> dict:
+    return {
+        "$id": _int(consent.id),
+        "$user_id": _int(consent.user_id),
+        "$document_version": _utf8(consent.document_version),
+        "$profile_data_allowed": _bool(consent.profile_data_allowed),
+        "$created_at": _timestamp(consent.created_at),
+    }
+
+
+def _event_params(event: Event) -> dict:
+    return {
+        "$id": _int(event.id),
+        "$title": _utf8(event.title),
+        "$description": _utf8(event.description),
+        "$requirements": _utf8(event.requirements),
+        "$starts_at": _timestamp(event.starts_at),
+        "$duration_minutes": _int(event.duration_minutes),
+        "$format": _utf8(event.format.value),
+        "$location_or_url": _utf8(event.location_or_url),
+        "$cancellation_policy_text": _utf8(event.cancellation_policy_text),
+        "$capacity_total": _int(event.capacity_total),
+        "$registration_closed": _bool(event.registration_closed),
+        "$late_cancel_policy": _utf8(event.late_cancel_policy.value),
+        "$created_at": _timestamp(event.created_at),
+        "$booked_count": _int(event.booked_count),
+    }
+
+
+def _slot_params(slot: EventSlot) -> dict:
+    return {
+        "$id": _int(slot.id),
+        "$event_id": _int(slot.event_id),
+        "$title": _utf8(slot.title),
+        "$starts_at": _timestamp(slot.starts_at),
+        "$ends_at": _timestamp(slot.ends_at),
+        "$capacity": _int(slot.capacity),
+        "$booked_count": _int(slot.booked_count),
+    }
+
+
+def _registration_params(registration: Registration) -> dict:
+    return {
+        "$id": _int(registration.id),
+        "$code": _utf8(registration.code),
+        "$user_id": _int(registration.user_id),
+        "$event_id": _int(registration.event_id),
+        "$slot_id": _opt_int(registration.slot_id),
+        "$status": _utf8(registration.status.value),
+        "$notifications_enabled": _bool(registration.notifications_enabled),
+        "$created_at": _timestamp(registration.created_at),
+        "$updated_at": _timestamp(registration.updated_at),
+        "$canceled_at": _opt_timestamp(registration.canceled_at),
+        "$attended_at": _opt_timestamp(registration.attended_at),
+    }
+
+
+def _notification_params(item: NotificationOutbox) -> dict:
+    return {
+        "$id": _int(item.id),
+        "$event_id": _int(item.event_id),
+        "$registration_id": _opt_int(item.registration_id),
+        "$user_id": _int(item.user_id),
+        "$kind": _utf8(item.kind.value),
+        "$message_text": _utf8(item.message_text),
+        "$send_after": _timestamp(item.send_after),
+        "$status": _utf8(item.status.value),
+        "$attempts": _int(item.attempts),
+        "$last_error": _opt_utf8(item.last_error),
+        "$created_at": _timestamp(item.created_at),
+        "$sent_at": _opt_timestamp(item.sent_at),
+    }
+
+
+def _role_params(item: RoleAssignment) -> dict:
+    return {"$id": _int(item.id), "$user_id": _int(item.user_id), "$role": _utf8(item.role)}
+
+
+def _organizer_event_params(item: OrganizerEvent) -> dict:
+    return {"$id": _int(item.id), "$user_id": _int(item.user_id), "$event_id": _int(item.event_id)}
+
+
+def _organizer_state_params(item: OrganizerState) -> dict:
+    return {
+        "$user_id": _int(item.user_id),
+        "$mode": _utf8(item.mode),
+        "$event_id": _opt_int(item.event_id),
+        "$step": _utf8(item.step),
+        "$data_json": _utf8(json.dumps(item.data, ensure_ascii=False)),
+        "$updated_at": _timestamp(item.updated_at),
+    }
+
+
+def _audit_params(item: AuditLog) -> dict:
+    return {
+        "$id": _int(item.id),
+        "$actor_user_id": _opt_int(item.actor_user_id),
+        "$action": _utf8(item.action),
+        "$entity_type": _utf8(item.entity_type),
+        "$entity_id": _utf8(item.entity_id),
+        "$metadata_json": _utf8(json.dumps(item.metadata_json, ensure_ascii=False)),
+        "$created_at": _timestamp(item.created_at),
+    }
+
+
+def _reset_slot_counter(slot: EventSlot) -> EventSlot:
+    slot.booked_count = 0
+    return slot
+
+
+def _slots_match_existing(current: list[EventSlot], incoming: list[EventSlot]) -> bool:
+    if len(current) != len(incoming):
+        return False
+    for existing, candidate in zip(current, incoming, strict=True):
+        if candidate.id != existing.id:
+            return False
+        if candidate.title != existing.title:
+            return False
+        if candidate.starts_at != existing.starts_at:
+            return False
+        if candidate.ends_at != existing.ends_at:
+            return False
+        if candidate.capacity != existing.capacity:
+            return False
+    return True

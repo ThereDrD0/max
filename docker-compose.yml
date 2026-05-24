@@ -1,0 +1,43 @@
+services:
+  ydb:
+    image: ydbplatform/local-ydb:latest
+    platform: linux/amd64
+    hostname: ydb
+    environment:
+      GRPC_TLS_PORT: 2135
+      GRPC_PORT: 2136
+      MON_PORT: 8765
+      YDB_GRPC_ENABLE_TLS: 0
+      YDB_USE_IN_MEMORY_PDISKS: "true"
+    ports:
+      - "2136:2136"
+      - "8765:8765"
+    volumes:
+      - ydb_data:/ydb_data
+
+  bot:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-docker}
+      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN:-}
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      WEBHOOK_PATH: ${WEBHOOK_PATH:-/webhook}
+      STORAGE_BACKEND: ydb
+      YDB_ENDPOINT: grpc://ydb:2136
+      YDB_DATABASE: ${YDB_DATABASE:-/local}
+      YDB_METADATA_CREDENTIALS: "false"
+      ADMIN_USER_IDS: ${ADMIN_USER_IDS:-}
+      ORGANIZER_USER_IDS: ${ORGANIZER_USER_IDS:-}
+      MAX_API_RPS: ${MAX_API_RPS:-30}
+      DOCUMENTS_VERSION: ${DOCUMENTS_VERSION:-hackathon-2026-05}
+    depends_on:
+      - ydb
+    ports:
+      - "8080:8080"
+
+volumes:
+  ydb_data:

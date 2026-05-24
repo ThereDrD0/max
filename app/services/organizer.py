@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+
+from app.domain import InvalidNotificationKindError
+from app.enums import MANUAL_NOTIFICATION_KINDS, NotificationKind, RegistrationStatus
+from app.storage.base import Storage
+from app.storage.entities import Event, EventSlot, NotificationOutbox, Registration
+
+
+class OrganizerService:
+    def __init__(
+        self,
+        storage: Storage,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.storage = storage
+        self.now = now or (lambda: datetime.now(timezone.utc))
+
+    def list_events(self, actor_user_id: int) -> list[Event]:
+        return self.storage.list_organizer_events(actor_user_id)
+
+    def can_use_menu(self, actor_user_id: int) -> bool:
+        return self.storage.has_role(actor_user_id, "organizer") or self.storage.has_role(actor_user_id, "admin")
+
+    def get_event_registrations(
+        self,
+        actor_user_id: int,
+        event_id: int,
+    ) -> list[Registration]:
+        return self.storage.get_event_registrations(actor_user_id, event_id)
+
+    def find_registration_by_code(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        code: str,
+    ) -> Registration:
+        return self.storage.find_registration_by_code(actor_user_id, event_id, code)
+
+    def find_registration_by_code_any_event(
+        self,
+        actor_user_id: int,
+        code: str,
+    ) -> Registration:
+        return self.storage.find_registration_by_code_any_event(actor_user_id, code)
+
+    def close_registration(self, actor_user_id: int, event_id: int) -> Event:
+        return self.storage.close_registration(actor_user_id, event_id)
+
+    def reschedule_event(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        starts_at: datetime,
+    ) -> Event:
+        previous = self.storage.get_event(event_id)
+        previous_start = previous.starts_at if previous is not None else None
+        event = self.storage.reschedule_event(
+            actor_user_id,
+            event_id,
+            starts_at,
+            now=self.now(),
+        )
+        if previous_start is not None and previous_start != starts_at:
+            self.enqueue_manual_notification(
+                actor_user_id,
+                event_id,
+                NotificationKind.TIME_CHANGED,
+            )
+        return event
+
+    def update_event_location(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        location_or_url: str,
+    ) -> Event:
+        previous = self.storage.get_event(event_id)
+        previous_location = previous.location_or_url if previous is not None else None
+        event = self.storage.update_event_location(
+            actor_user_id,
+            event_id,
+            location_or_url,
+            now=self.now(),
+        )
+        if previous_location is not None and previous_location != event.location_or_url:
+            self.enqueue_manual_notification(
+                actor_user_id,
+                event_id,
+                NotificationKind.VENUE_CHANGED,
+            )
+        return event
+
+    def create_event(
+        self,
+        actor_user_id: int,
+        event: Event,
+        *,
+        slots: list[EventSlot],
+        image_token: str | None,
+        image_url: str | None,
+    ) -> Event:
+        return self.storage.create_organizer_event(
+            actor_user_id,
+            event,
+            slots=slots,
+            image_token=image_token,
+            image_url=image_url,
+            now=self.now(),
+        )
+
+    def replace_event(
+        self,
+        actor_user_id: int,
+        event: Event,
+        *,
+        slots: list[EventSlot],
+        image_token: str | None,
+        image_url: str | None,
+    ) -> Event:
+        previous = self.storage.get_event(event.id)
+        previous_start = previous.starts_at if previous is not None else None
+        previous_location = previous.location_or_url if previous is not None else None
+        updated = self.storage.replace_organizer_event(
+            actor_user_id,
+            event,
+            slots=slots,
+            image_token=image_token,
+            image_url=image_url,
+            now=self.now(),
+        )
+        if previous_start is not None and previous_start != updated.starts_at:
+            self.enqueue_manual_notification(
+                actor_user_id,
+                updated.id,
+                NotificationKind.TIME_CHANGED,
+            )
+        if previous_location is not None and previous_location != updated.location_or_url:
+            self.enqueue_manual_notification(
+                actor_user_id,
+                updated.id,
+                NotificationKind.VENUE_CHANGED,
+            )
+        return updated
+
+    def mark_attended(self, actor_user_id: int, registration_id: int) -> Registration:
+        return self.storage.mark_attended(
+            actor_user_id,
+            registration_id,
+            now=self.now(),
+        )
+
+    def change_status(
+        self,
+        actor_user_id: int,
+        registration_id: int,
+        status: RegistrationStatus,
+    ) -> Registration:
+        return self.storage.change_status(
+            actor_user_id,
+            registration_id,
+            status,
+            now=self.now(),
+        )
+
+    def enqueue_manual_notification(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        kind: NotificationKind,
+    ) -> list[NotificationOutbox]:
+        if kind not in MANUAL_NOTIFICATION_KINDS:
+            raise InvalidNotificationKindError("Этот тип уведомления нельзя отправить вручную")
+        event = self.storage.get_event(event_id)
+        message_text = self._render_manual_notification(kind, event)
+        return self.storage.enqueue_manual_notification(
+            actor_user_id=actor_user_id,
+            event_id=event_id,
+            kind=kind,
+            message_text=message_text,
+            now=self.now(),
+        )
+
+    @staticmethod
+    def _render_manual_notification(kind: NotificationKind, event: Event | None) -> str:
+        title = event.title if event else "мероприятию"
+        if kind == NotificationKind.TIME_CHANGED:
+            return f"Обновление по мероприятию «{title}»: изменилось время. Проверьте карточку записи."
+        if kind == NotificationKind.VENUE_CHANGED:
+            return f"Обновление по мероприятию «{title}»: изменилась аудитория или место проведения."
+        if kind == NotificationKind.JOIN_LINK_CHANGED:
+            return f"Обновление по мероприятию «{title}»: обновлена ссылка на подключение."
+        raise InvalidNotificationKindError("Неподдерживаемый тип уведомления")

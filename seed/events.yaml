@@ -1,0 +1,32 @@
+events:
+  - slug: "it-open-day-2026-06-15"
+    title: "День открытых дверей ИТ-института"
+    description: "Презентация программ, встреча с преподавателями и экскурсия по лабораториям."
+    requirements: "Регистрация в боте и код записи на входе."
+    starts_at: "2026-06-15T10:00:00+03:00"
+    duration_minutes: 120
+    format: "in_person"
+    location_or_url: "Главный корпус, аудитория 101"
+    cancellation_policy_text: "Запись можно отменить до начала мероприятия."
+    capacity_total: 60
+    late_cancel_policy: "deny"
+    slots:
+      - title: "10:00"
+        starts_at: "2026-06-15T10:00:00+03:00"
+        ends_at: "2026-06-15T11:00:00+03:00"
+        capacity: 30
+      - title: "11:15"
+        starts_at: "2026-06-15T11:15:00+03:00"
+        ends_at: "2026-06-15T12:15:00+03:00"
+        capacity: 30
+  - slug: "online-admission-2026-06-20"
+    title: "Онлайн-консультация по поступлению"
+    description: "Приёмная комиссия отвечает на вопросы по документам, срокам и направлениям подготовки."
+    requirements: "Подключиться по ссылке из карточки за 5 минут до начала."
+    starts_at: "2026-06-20T18:00:00+03:00"
+    duration_minutes: 60
+    format: "online"
+    location_or_url: "https://example.edu/admission-live"
+    cancellation_policy_text: "Запись можно отменить до начала, поздняя отмена помечается отдельно."
+    capacity_total: 200
+    late_cancel_policy: "allow_late"
