@@ -82,3 +82,67 @@ def test_manual_notifications_are_limited_to_event_templates(
             event.id,
             NotificationKind.REMINDER_1H,
         )
+
+
+def test_organizer_manual_reminder_can_target_single_slot_with_custom_text(
+    storage, fixed_now
+):
+    event = create_event(
+        storage,
+        fixed_now,
+        title="Экскурсия по лабораториям",
+        with_slots=True,
+    )
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    registration_service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "SLOT01",
+    )
+    registration_service.upsert_user(101, "Анна")
+    registration_service.record_profile_consent(101, "hackathon-2026-05")
+    first = registration_service.create_registration(
+        101,
+        event.id,
+        event.slots[0].id,
+    )
+    registration_service.code_generator = lambda: "SLOT02"
+    registration_service.upsert_user(102, "Петр")
+    registration_service.record_profile_consent(102, "hackathon-2026-05")
+    registration_service.create_registration(102, event.id, event.slots[1].id)
+    service = OrganizerService(storage, now=lambda: fixed_now)
+
+    created = service.enqueue_manual_reminder(
+        501,
+        event.id,
+        slot_id=event.slots[0].id,
+        custom_text="Возьмите с собой студенческий билет.",
+    )
+
+    assert [item.user_id for item in created] == [101]
+    assert created[0].kind == NotificationKind.MANUAL_REMINDER
+    assert created[0].registration_id == first.id
+    assert "Возьмите с собой студенческий билет." in created[0].message_text
+    assert "Код записи: SLOT01" in created[0].message_text
+    assert "Слот: 10:00" in created[0].message_text
+
+
+def test_organizer_manual_reminder_uses_auto_text_when_custom_text_is_blank(
+    storage, fixed_now
+):
+    event, registration = seed_event_with_registration(storage, fixed_now)
+    service = OrganizerService(storage, now=lambda: fixed_now)
+
+    created = service.enqueue_manual_reminder(
+        501,
+        event.id,
+        slot_id=None,
+        custom_text="   ",
+    )
+
+    assert len(created) == 1
+    assert created[0].user_id == registration.user_id
+    assert "Напоминание: мероприятие скоро начнётся." in created[0].message_text
+    assert event.title in created[0].message_text
+    assert f"Код записи: {registration.code}" in created[0].message_text

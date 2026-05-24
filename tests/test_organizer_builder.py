@@ -131,6 +131,139 @@ async def test_organizer_changes_location_and_enqueues_notification(
     assert "🧑‍💼 МЕНЮ ОРГАНИЗАТОРА" in fake_bot.sent[-1]["text"]
 
 
+async def test_organizer_reminder_without_slots_opens_text_prompt_immediately(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Пробное занятие")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_remind", event_id=event.id).pack(),
+    )
+
+    message = fake_bot.sent[-1]
+    assert "Отправьте текст напоминания" in message["text"]
+    assert "Использовать автотекст" in _button_texts(message)
+    assert "Всем записавшимся" not in _button_texts(message)
+    state = storage.get_organizer_state(501)
+    assert state is not None
+    assert state.mode == "manual_reminder_text"
+    assert state.data["slot_id"] is None
+
+
+async def test_organizer_reminder_with_slots_allows_scope_and_custom_text(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(
+        storage,
+        fixed_now,
+        title="Экскурсия по лабораториям",
+        with_slots=True,
+    )
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "REM101",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    handlers.registration_service.create_registration(101, event.id, event.slots[0].id)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_remind", event_id=event.id).pack(),
+    )
+    scope_message = fake_bot.sent[-1]
+    scope_buttons = _buttons(scope_message)
+    assert "Кому отправить напоминание" in scope_message["text"]
+    assert any(button["text"] == "🔔 Всем записавшимся" for button in scope_buttons)
+    assert any("10:00" in button["text"] for button in scope_buttons)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload(
+            "org_remind_slot",
+            event_id=event.id,
+            slot_id=event.slots[0].id,
+        ).pack(),
+    )
+    await handlers.handle_message(
+        501,
+        "Организатор",
+        9003,
+        "Ждём вас у входа в первый корпус.",
+    )
+
+    manual_items = [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.MANUAL_REMINDER
+    ]
+    assert len(manual_items) == 1
+    assert "Ждём вас у входа в первый корпус." in manual_items[0].message_text
+    assert "Код записи: REM101" in manual_items[0].message_text
+    assert "Напоминание поставлено в очередь для 1 участников." in fake_bot.sent[-1]["text"]
+
+
+async def test_organizer_reminder_auto_button_uses_default_text(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="Пробное занятие")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "AUTO01",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    handlers.registration_service.create_registration(101, event.id, None)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_remind", event_id=event.id).pack(),
+    )
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_remind_auto").pack(),
+    )
+
+    manual_items = [
+        item
+        for item in storage.list_notifications()
+        if item.kind == NotificationKind.MANUAL_REMINDER
+    ]
+    assert len(manual_items) == 1
+    assert "Напоминание: мероприятие скоро начнётся." in manual_items[0].message_text
+    assert "Код записи: AUTO01" in manual_items[0].message_text
+
+
 async def test_builder_creates_event_with_slots_and_image(
     storage,
     fake_bot,

@@ -39,6 +39,7 @@ from app.domain import (
     NoSeatsAvailableError,
     RegistrationClosedError,
     RegistrationNotFoundError,
+    SlotNotFoundError,
 )
 from app.enums import (
     ACTIVE_REGISTRATION_STATUSES,
@@ -91,6 +92,7 @@ BUILDER_MODE_EDIT = "builder_edit"
 STATE_EDIT_DATE = "edit_date"
 STATE_EDIT_TIME = "edit_time"
 STATE_EDIT_PLACE = "edit_place"
+STATE_MANUAL_REMINDER_TEXT = "manual_reminder_text"
 TAKE_CURRENT_TEXT = "♻️ ВЗЯТЬ ТЕКУЩЕЕ"
 
 
@@ -354,6 +356,24 @@ class BotHandlers:
                 data.event_id,
                 "Отправьте новое место или ссылку одним сообщением.",
             )
+        elif data.action == "org_remind" and data.event_id is not None:
+            await self._send_organizer_reminder_entry(user_id, chat_id, data.event_id)
+        elif data.action == "org_remind_all" and data.event_id is not None:
+            await self._start_manual_reminder_text(
+                user_id,
+                chat_id,
+                data.event_id,
+                slot_id=None,
+            )
+        elif data.action == "org_remind_slot" and data.event_id is not None:
+            await self._start_manual_reminder_text(
+                user_id,
+                chat_id,
+                data.event_id,
+                slot_id=data.slot_id,
+            )
+        elif data.action == "org_remind_auto":
+            await self._finish_manual_reminder_text(user_id, chat_id, custom_text=None)
         elif data.action in {
             "org_builder_current",
             "org_builder_format",
@@ -1067,6 +1087,12 @@ class BotHandlers:
             ],
             [
                 callback_button(
+                    "🔔 Напомнить участникам",
+                    Payload("org_remind", event_id=event_id),
+                )
+            ],
+            [
+                callback_button(
                     "📝 Заполнить информацию заново",
                     Payload("org_rebuild", event_id=event_id),
                 )
@@ -1095,6 +1121,133 @@ class BotHandlers:
             chat_id=chat_id,
             text=f"🧑‍💼 МЕНЮ ОРГАНИЗАТОРА\n\n{public_text}",
             attachments=self._event_detail_attachments(event, rows),
+        )
+
+    async def _send_organizer_reminder_entry(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        event_id: int,
+    ) -> None:
+        event = self._organizer_event_for_actor(user_id, event_id)
+        if not event.slots:
+            await self._start_manual_reminder_text(
+                user_id,
+                chat_id,
+                event.id,
+                slot_id=None,
+            )
+            return
+        rows = [
+            [
+                callback_button(
+                    "🔔 Всем записавшимся",
+                    Payload("org_remind_all", event_id=event.id),
+                )
+            ]
+        ]
+        for slot in event.slots:
+            rows.append(
+                [
+                    callback_button(
+                        f"🕙 Слот {slot.title}",
+                        Payload("org_remind_slot", event_id=event.id, slot_id=slot.id),
+                    )
+                ]
+            )
+        rows.append(
+            [callback_button("⬅️ Назад", Payload("org_event", event_id=event.id))]
+        )
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=f"Кому отправить напоминание по мероприятию «{event.title}»?",
+            attachments=inline_keyboard(rows),
+        )
+
+    async def _start_manual_reminder_text(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        event_id: int,
+        *,
+        slot_id: int | None,
+    ) -> None:
+        event = self._organizer_event_for_actor(user_id, event_id)
+        if slot_id is not None and not any(slot.id == slot_id for slot in event.slots):
+            raise SlotNotFoundError("Слот не найден")
+        self.storage.set_organizer_state(
+            OrganizerState(
+                user_id=user_id,
+                mode=STATE_MANUAL_REMINDER_TEXT,
+                event_id=event_id,
+                step=STATE_MANUAL_REMINDER_TEXT,
+                data={"slot_id": slot_id},
+                updated_at=self.now(),
+            )
+        )
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=(
+                "Отправьте текст напоминания одним сообщением.\n\n"
+                "Если свой текст не нужен, нажмите «Использовать автотекст»."
+            ),
+            attachments=inline_keyboard(
+                [
+                    [
+                        callback_button(
+                            "🔔 Использовать автотекст",
+                            Payload("org_remind_auto"),
+                        )
+                    ],
+                    [
+                        callback_button(
+                            "⬅️ Назад",
+                            Payload("org_event", event_id=event_id),
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    async def _finish_manual_reminder_text(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        *,
+        custom_text: str | None,
+    ) -> None:
+        state = self.storage.get_organizer_state(user_id)
+        if (
+            state is None
+            or state.mode != STATE_MANUAL_REMINDER_TEXT
+            or state.event_id is None
+        ):
+            await self._send_organizer_menu(user_id, chat_id)
+            return
+        created = self.organizer_service.enqueue_manual_reminder(
+            user_id,
+            state.event_id,
+            slot_id=state.data.get("slot_id"),
+            custom_text=custom_text,
+        )
+        event_id = state.event_id
+        self.storage.clear_organizer_state(user_id)
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=f"Напоминание поставлено в очередь для {len(created)} участников.",
+            attachments=inline_keyboard(
+                [
+                    [
+                        callback_button(
+                            "🧑‍💼 Открыть мероприятие",
+                            Payload("org_event", event_id=event_id),
+                        )
+                    ]
+                ]
+            ),
         )
 
     async def _handle_pending_event_image(
@@ -1208,6 +1361,13 @@ class BotHandlers:
             return
         if state.mode in {STATE_EDIT_DATE, STATE_EDIT_TIME}:
             await self._handle_edit_datetime_message(user_id, chat_id, state, text)
+            return
+        if state.mode == STATE_MANUAL_REMINDER_TEXT:
+            await self._finish_manual_reminder_text(
+                user_id,
+                chat_id,
+                custom_text=text,
+            )
             return
         if state.mode in {BUILDER_MODE_CREATE, BUILDER_MODE_EDIT}:
             await self._handle_builder_message(user_id, chat_id, state, text, attachments)
@@ -1884,6 +2044,8 @@ class BotHandlers:
             return "Свободных мест уже нет."
         if isinstance(exc, RegistrationClosedError):
             return "Регистрация закрыта."
+        if isinstance(exc, SlotNotFoundError):
+            return "Слот не найден."
         if isinstance(exc, LateCancellationDeniedError):
             return "После начала мероприятия отмена недоступна."
         if isinstance(exc, AccessDeniedError):

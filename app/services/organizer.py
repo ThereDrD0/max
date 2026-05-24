@@ -3,8 +3,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from app.domain import EventStartInPastError, InvalidNotificationKindError
-from app.enums import MANUAL_NOTIFICATION_KINDS, NotificationKind, RegistrationStatus
+from app.domain import (
+    EventStartInPastError,
+    InvalidNotificationKindError,
+    SlotNotFoundError,
+)
+from app.enums import (
+    ACTIVE_REGISTRATION_STATUSES,
+    MANUAL_NOTIFICATION_KINDS,
+    NotificationKind,
+    RegistrationStatus,
+)
 from app.storage.base import Storage
 from app.storage.entities import Event, EventSlot, NotificationOutbox, Registration
 
@@ -187,6 +196,51 @@ class OrganizerService:
             now=self.now(),
         )
 
+    def enqueue_manual_reminder(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        *,
+        slot_id: int | None,
+        custom_text: str | None,
+        starts_in_text: str | None = None,
+    ) -> list[NotificationOutbox]:
+        event = self.storage.get_event(event_id)
+        if event is not None and slot_id is not None and not any(
+            slot.id == slot_id for slot in event.slots
+        ):
+            raise SlotNotFoundError("Слот не найден")
+        registrations = self.storage.get_event_registrations(actor_user_id, event_id)
+        created: list[NotificationOutbox] = []
+        current = self.now()
+        for registration in registrations:
+            if registration.status not in ACTIVE_REGISTRATION_STATUSES:
+                continue
+            if not registration.notifications_enabled:
+                continue
+            if slot_id is not None and registration.slot_id != slot_id:
+                continue
+            created.append(
+                self.storage.add_notification(
+                    NotificationOutbox(
+                        id=0,
+                        event_id=event_id,
+                        registration_id=registration.id,
+                        user_id=registration.user_id,
+                        kind=NotificationKind.MANUAL_REMINDER,
+                        message_text=self._render_manual_reminder(
+                            event or registration.event,
+                            registration,
+                            custom_text=custom_text,
+                            starts_in_text=starts_in_text,
+                        ),
+                        send_after=current,
+                        created_at=current,
+                    )
+                )
+            )
+        return created
+
     @staticmethod
     def _render_manual_notification(kind: NotificationKind, event: Event | None) -> str:
         title = event.title if event else "мероприятию"
@@ -197,6 +251,30 @@ class OrganizerService:
         if kind == NotificationKind.JOIN_LINK_CHANGED:
             return f"Обновление по мероприятию «{title}»: обновлена ссылка на подключение."
         raise InvalidNotificationKindError("Неподдерживаемый тип уведомления")
+
+    @staticmethod
+    def _render_manual_reminder(
+        event: Event | None,
+        registration: Registration,
+        *,
+        custom_text: str | None,
+        starts_in_text: str | None,
+    ) -> str:
+        clean_text = (custom_text or "").strip()
+        if not clean_text:
+            clean_starts_in = (starts_in_text or "").strip()
+            if clean_starts_in:
+                clean_text = f"Напоминание: мероприятие начнётся примерно через {clean_starts_in}."
+            else:
+                clean_text = "Напоминание: мероприятие скоро начнётся."
+        title = event.title if event else "Мероприятие"
+        lines = [clean_text, "", title]
+        if registration.slot is not None:
+            lines.append(f"Слот: {registration.slot.title}")
+        lines.append(f"Код записи: {registration.code}")
+        if event is not None:
+            lines.append(f"Место/ссылка: {event.location_or_url}")
+        return "\n".join(lines)
 
     def _ensure_future_start(self, starts_at: datetime) -> None:
         if starts_at <= self.now():
