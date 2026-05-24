@@ -148,7 +148,7 @@ async def test_main_menu_buttons_open_current_sections(
     assert "🏠 Главное меню" in _button_texts(fake_bot.sent[-1])
 
     await handlers.handle_callback(501, "Организатор", 9003, Payload("org_menu").pack())
-    assert "🧑‍💼📚 Книга мероприятий Организатора" in fake_bot.sent[-1]["text"]
+    assert "📚 Книга мероприятий Организатора" in fake_bot.sent[-1]["text"]
     assert "Пробное занятие по Python" in fake_bot.sent[-1]["text"]
     assert "🏠 Главное меню" in _button_texts(fake_bot.sent[-1])
     assert _has_local_organizer_menu_image(fake_bot.sent[-1])
@@ -175,7 +175,7 @@ async def test_organizer_menu_paginates_and_returns_to_same_page(
     await handlers.handle_message(501, "Организатор", 9003, "/organizer")
 
     first_page = fake_bot.sent[-1]
-    assert "🧑‍💼📚 Книга мероприятий Организатора" in first_page["text"]
+    assert "📚 Книга мероприятий Организатора" in first_page["text"]
     assert "Страница 1/3" in first_page["text"]
     assert "🔥 БЛИЖАЙШИЕ" in first_page["text"]
     for day in range(1, 7):

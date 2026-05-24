@@ -503,6 +503,21 @@ class BotHandlers:
                 registration.event_id,
                 page=self._payload_page(data),
             )
+        elif (
+            data.action == "org_participant_confirmed"
+            and data.event_id is not None
+            and data.registration_id is not None
+        ):
+            registration = self.organizer_service.mark_confirmed(
+                user_id,
+                data.registration_id,
+            )
+            await self._send_organizer_participants(
+                user_id,
+                chat_id,
+                registration.event_id,
+                page=self._payload_page(data),
+            )
         else:
             await self._send(
                 user_id=user_id,
@@ -1071,7 +1086,7 @@ class BotHandlers:
 
         if not book_events:
             text = (
-                "🧑‍💼📚 Книга мероприятий Организатора\n"
+                "📚 Книга мероприятий Организатора\n"
                 "Страница 1/1\n\n"
                 "✨ Пока в книге Организатора нет мероприятий. "
                 "Создайте первое — оно появится здесь сразу после заполнения."
@@ -1098,7 +1113,7 @@ class BotHandlers:
             page * ORGANIZER_BOOK_PAGE_SIZE : (page + 1) * ORGANIZER_BOOK_PAGE_SIZE
         ]
         lines = [
-            "🧑‍💼📚 Книга мероприятий Организатора",
+            "📚 Книга мероприятий Организатора",
             f"Страница {page + 1}/{total_pages}",
             "",
             "Листайте книгу кнопками ниже и открывайте нужное мероприятие. 🗂️",
@@ -1177,7 +1192,7 @@ class BotHandlers:
         *,
         page: int = 0,
     ) -> None:
-        self.organizer_service.get_event_registrations(user_id, event_id)
+        registrations = self.organizer_service.get_event_registrations(user_id, event_id)
         event = self.storage.get_event(event_id)
         assert event is not None
         deeplink = await self._event_deeplink(event) if self._event_visible_to_users(event) else None
@@ -1202,14 +1217,15 @@ class BotHandlers:
             ],
             reminder_buttons,
         ]
-        rows.append(
-            [
-                callback_button(
-                    "👥 Участники",
-                    Payload("org_participants", event_id=event_id),
-                )
-            ]
-        )
+        if registrations:
+            rows.append(
+                [
+                    callback_button(
+                        "👥 Участники",
+                        Payload("org_participants", event_id=event_id),
+                    )
+                ]
+            )
         close_buttons = []
         if self._event_visible_to_users(event) and not event.registration_closed:
             close_buttons.append(
@@ -1280,21 +1296,21 @@ class BotHandlers:
             page * PARTICIPANTS_BOOK_PAGE_SIZE : (page + 1) * PARTICIPANTS_BOOK_PAGE_SIZE
         ]
         lines = [
-            "🧑‍💼👥 Участники мероприятия",
+            "👥 Участники мероприятия",
             f"Страница {page + 1}/{total_pages}",
             "",
-            f"Мероприятие: {event.title}",
+            f"Мероприятие: {self._markdown_text(event.title)}",
             (
-                "Здесь видны записи на мероприятие: имя участника, код и текущий "
+                "Здесь видны записи на мероприятие: профиль участника, код и текущий "
                 "статус."
             ),
-            "Нажмите на имя записанного участника, чтобы отметить, что он пришел.",
+            "Нажмите на профиль записанного участника, чтобы отметить, что он пришел.",
         ]
         if page_registrations:
             lines.append("")
             for offset, registration in enumerate(page_registrations, start=first_offset):
                 lines.append(
-                    f"{offset}. {self._participant_name(registration)} - "
+                    f"{offset}. {self._participant_profile_link(registration)} - "
                     f"{registration.code} - "
                     f"{self._format_participant_status(registration.status)}"
                 )
@@ -1304,24 +1320,41 @@ class BotHandlers:
         rows: list[list[dict]] = []
         current_row: list[dict] = []
         for registration in page_registrations:
-            if registration.status != RegistrationStatus.CONFIRMED:
+            if registration.status not in {
+                RegistrationStatus.CONFIRMED,
+                RegistrationStatus.ATTENDED,
+            }:
                 continue
             button_name = self._short_button_title(
                 self._participant_name(registration),
                 max_chars=PARTICIPANT_BUTTON_NAME_MAX_CHARS,
             )
-            current_row.append(
-                callback_button(
-                    f"✅ {button_name} пришел",
-                    Payload(
-                        "org_participant_attended",
-                        event_id=event.id,
-                        registration_id=registration.id,
-                        value=str(page),
-                    ),
-                    intent="positive",
+            if registration.status == RegistrationStatus.CONFIRMED:
+                current_row.append(
+                    callback_button(
+                        f"✅ {button_name} пришел",
+                        Payload(
+                            "org_participant_attended",
+                            event_id=event.id,
+                            registration_id=registration.id,
+                            value=str(page),
+                        ),
+                        intent="positive",
+                    )
                 )
-            )
+            else:
+                current_row.append(
+                    callback_button(
+                        f"↩️ {button_name} записан",
+                        Payload(
+                            "org_participant_confirmed",
+                            event_id=event.id,
+                            registration_id=registration.id,
+                            value=str(page),
+                        ),
+                        intent="default",
+                    )
+                )
             if len(current_row) == 2:
                 rows.append(current_row)
                 current_row = []
@@ -1366,6 +1399,7 @@ class BotHandlers:
                 local_image_attachment(PARTICIPANTS_MENU_IMAGE_PATH),
                 *inline_keyboard(rows),
             ],
+            format="markdown",
         )
 
     async def _send_organizer_close_confirmation(
@@ -2432,6 +2466,19 @@ class BotHandlers:
         return f"Участник {registration.user_id}"
 
     @classmethod
+    def _participant_profile_link(cls, registration: Registration) -> str:
+        name = cls._markdown_link_text(cls._participant_name(registration))
+        return f"[{name}](max://user/{registration.user_id})"
+
+    @staticmethod
+    def _markdown_text(value: str) -> str:
+        return "".join(f"\\{char}" if char in "\\[]()" else char for char in value)
+
+    @staticmethod
+    def _markdown_link_text(value: str) -> str:
+        return "".join(f"\\{char}" if char in "\\[]()" else char for char in value)
+
+    @classmethod
     def _format_status_for_user(cls, status: RegistrationStatus) -> str:
         icon = "✅" if status in ACTIVE_REGISTRATION_STATUSES else "⚪"
         return f"{icon} {cls._format_status(status)}"
@@ -2495,6 +2542,7 @@ class BotHandlers:
         chat_id: int | None,
         text: str,
         attachments: list | None = None,
+        format: str | None = None,
     ) -> None:
         async with _send_lock_for(user_id):
             await self._send_unlocked(
@@ -2502,6 +2550,7 @@ class BotHandlers:
                 chat_id=chat_id,
                 text=text,
                 attachments=attachments,
+                format=format,
             )
 
     async def _send_unlocked(
@@ -2511,15 +2560,19 @@ class BotHandlers:
         chat_id: int | None,
         text: str,
         attachments: list | None = None,
+        format: str | None = None,
     ) -> None:
         if self._source_message_id is not None:
             try:
-                message_id = await self.bot.edit_message(
-                    message_id=self._source_message_id,
-                    text=text,
-                    attachments=attachments,
-                    notify=False,
-                )
+                edit_kwargs = {
+                    "message_id": self._source_message_id,
+                    "text": text,
+                    "attachments": attachments,
+                    "notify": False,
+                }
+                if format is not None:
+                    edit_kwargs["format"] = format
+                message_id = await self.bot.edit_message(**edit_kwargs)
                 self.storage.set_last_bot_message_id(
                     user_id,
                     message_id or self._source_message_id,
@@ -2535,12 +2588,15 @@ class BotHandlers:
                 await self.bot.delete_message(message_id=previous_message_id)
             except Exception:
                 pass
-        message_id = await self.bot.send_message(
-            user_id=user_id,
-            chat_id=chat_id,
-            text=text,
-            attachments=attachments,
-        )
+        send_kwargs = {
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "text": text,
+            "attachments": attachments,
+        }
+        if format is not None:
+            send_kwargs["format"] = format
+        message_id = await self.bot.send_message(**send_kwargs)
         if message_id:
             self.storage.set_last_bot_message_id(user_id, message_id, now=self.now())
         await self._delete_source_user_message()

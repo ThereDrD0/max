@@ -67,7 +67,7 @@ async def test_organizer_menu_separates_past_events_and_shows_days_until_cleanup
     await handlers.handle_message(501, "Организатор", 9003, "/organizer")
 
     text = fake_bot.sent[-1]["text"]
-    assert "🧑‍💼📚 Книга мероприятий Организатора" in text
+    assert "📚 Книга мероприятий Организатора" in text
     assert "🔥 БЛИЖАЙШИЕ" in text
     assert "1. Будущее" in text
     assert "🕘 ПРОШЕДШИЕ" in text

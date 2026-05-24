@@ -118,6 +118,16 @@ def test_all_bot_ui_texts_follow_glossary_terms() -> None:
     assert defects == []
 
 
+def test_all_bot_ui_texts_do_not_have_adjacent_emojis() -> None:
+    defects = [
+        f"{text.source}: рядом стоят два эмодзи: {text.text!r}"
+        for text in _collect_ui_texts()
+        if _has_adjacent_emojis(text.text)
+    ]
+
+    assert defects == []
+
+
 def _collect_button_labels() -> list[ButtonLabel]:
     labels: list[ButtonLabel] = []
     for path in sorted(BOT_DIR.glob("*.py")):
@@ -215,7 +225,7 @@ def _ui_text_expressions(
                     )
                     if _looks_like_ui_text(text)
                 )
-        elif isinstance(node, ast.FunctionDef):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             texts.extend(_function_ui_texts(node, path, constants, helper_returns))
     return texts
 
@@ -241,7 +251,7 @@ def _call_ui_text_arguments(node: ast.Call) -> list[ast.AST]:
 
 
 def _function_ui_texts(
-    node: ast.FunctionDef,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
     path: Path,
     constants: dict[str, str],
     helper_returns: dict[str, list[str]],
@@ -258,6 +268,16 @@ def _function_ui_texts(
                 )
                 if _looks_like_ui_text(text)
             )
+        elif isinstance(item, ast.Assign):
+            target_names = [
+                target.id for target in item.targets if isinstance(target, ast.Name)
+            ]
+            if any(name in {"lines", "status_lines"} for name in target_names):
+                texts.extend(
+                    UiText(text=text, source=f"{path.name}:{item.lineno}")
+                    for text in _literal_text_values(item.value)
+                    if _looks_like_ui_text(text)
+                )
         elif isinstance(item, ast.Dict):
             for value in item.values:
                 for text in _literal_text_values(value):
@@ -374,3 +394,38 @@ def _space_quality_defects(text: str) -> list[str]:
         if re.search(r"[\t\u00a0\u2007\u202f]", line):
             defects.append(f"строка {line_number} содержит не обычный пробел: {line!r}")
     return defects
+
+
+def _has_adjacent_emojis(text: str) -> bool:
+    clusters = _emoji_clusters(text)
+    return any(left[1] == right[0] for left, right in zip(clusters, clusters[1:]))
+
+
+def _emoji_clusters(text: str) -> list[tuple[int, int]]:
+    clusters: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        if not _is_emoji_base(text[index]):
+            index += 1
+            continue
+        start = index
+        index = _consume_emoji_base(text, index)
+        while (
+            index + 1 < len(text)
+            and text[index] == "\u200d"
+            and _is_emoji_base(text[index + 1])
+        ):
+            index = _consume_emoji_base(text, index + 1)
+        clusters.append((start, index))
+    return clusters
+
+
+def _consume_emoji_base(text: str, index: int) -> int:
+    index += 1
+    while index < len(text) and text[index] == "\ufe0f":
+        index += 1
+    return index
+
+
+def _is_emoji_base(char: str) -> bool:
+    return char != "\ufe0f" and bool(EMOJI_RE.fullmatch(char))

@@ -244,6 +244,14 @@ class OrganizerService:
             )
         return registration
 
+    def mark_confirmed(self, actor_user_id: int, registration_id: int) -> Registration:
+        return self.storage.change_status(
+            actor_user_id,
+            registration_id,
+            RegistrationStatus.CONFIRMED,
+            now=self.now(),
+        )
+
     def change_status(
         self,
         actor_user_id: int,

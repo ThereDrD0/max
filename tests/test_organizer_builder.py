@@ -36,14 +36,7 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
     )
     handlers.registration_service.upsert_user(101, "Анна")
     handlers.registration_service.record_profile_consent(101, "docs")
-
-    await handlers.handle_callback(
-        user_id=101,
-        display_name="Анна",
-        chat_id=9001,
-        payload=Payload("event_detail", event_id=event.id).pack(),
-    )
-    user_card_text = fake_bot.sent[-1]["text"]
+    handlers.registration_service.create_registration(101, event.id, None)
 
     await handlers.handle_callback(
         user_id=501,
@@ -59,8 +52,7 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
     }
     assert message["attachments"][-1]["type"] == "inline_keyboard"
     assert message["text"].startswith("🧑‍💼 МЕНЮ ОРГАНИЗАТОРА")
-    assert user_card_text in message["text"]
-    assert "✅ Свободных мест: 2 из 2" in message["text"]
+    assert "✅ Свободных мест: 1 из 2" in message["text"]
     assert "↩️ Отмена:" not in message["text"]
     button_texts = _button_texts(message)
     rows = _keyboard_rows(message)
@@ -87,6 +79,26 @@ async def test_organizer_event_menu_uses_new_layout_and_image(
     assert "🔗 Поделиться" in button_texts
     assert "⬅️ Назад" in button_texts
     assert "Картинка" not in button_texts
+
+
+async def test_organizer_event_menu_hides_participants_button_without_registrations(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="День открытых дверей")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_event", event_id=event.id).pack(),
+    )
+
+    assert "👥 Участники" not in _button_texts(fake_bot.sent[-1])
 
 
 async def test_organizer_close_registration_requires_confirmation_and_hides_action(
@@ -238,7 +250,7 @@ async def test_organizer_menu_allows_role_to_create_event_without_existing_event
     await handlers.handle_message(501, "Организатор", 9003, "/organizer")
 
     message = fake_bot.sent[-1]
-    assert "🧑‍💼📚 Книга мероприятий Организатора" in message["text"]
+    assert "📚 Книга мероприятий Организатора" in message["text"]
     assert "Пока в книге Организатора нет мероприятий" in message["text"]
     assert "📝 Создать мероприятие" in _button_texts(message)
     assert "➕ Создать мероприятие" not in _button_texts(message)
@@ -468,20 +480,22 @@ async def test_organizer_participants_book_sorts_statuses_and_shows_action_butto
     )
 
     message = fake_bot.sent[-1]
-    assert "🧑‍💼👥 Участники мероприятия" in message["text"]
-    assert "Нажмите на имя записанного участника" in message["text"]
+    assert message["format"] == "markdown"
+    assert "👥 Участники мероприятия" in message["text"]
+    assert "Нажмите на профиль записанного участника" in message["text"]
     assert "Страница 1/1" in message["text"]
-    assert "1. Анна - CONF1 - Записан" in message["text"]
-    assert "2. Яна - CONF2 - Записан" in message["text"]
-    assert "3. Петр - ATT01 - Пришел" in message["text"]
-    assert "4. Борис - CAN01 - Запись отменена" in message["text"]
-    assert "5. Сергей - LATE1 - Запись отменена" in message["text"]
-    assert message["text"].index("1. Анна") < message["text"].index("2. Яна")
-    assert message["text"].index("2. Яна") < message["text"].index("3. Петр")
+    assert "1. [Анна](max://user/102) - CONF1 - Записан" in message["text"]
+    assert "2. [Яна](max://user/101) - CONF2 - Записан" in message["text"]
+    assert "3. [Петр](max://user/103) - ATT01 - Пришел" in message["text"]
+    assert "4. [Борис](max://user/104) - CAN01 - Запись отменена" in message["text"]
+    assert "5. [Сергей](max://user/105) - LATE1 - Запись отменена" in message["text"]
+    assert message["text"].index("1. [Анна]") < message["text"].index("2. [Яна]")
+    assert message["text"].index("2. [Яна]") < message["text"].index("3. [Петр]")
     button_texts = _button_texts(message)
     assert "✅ Анна пришел" in button_texts
     assert "✅ Яна пришел" in button_texts
     assert "✅ Петр пришел" not in button_texts
+    assert "↩️ Петр записан" in button_texts
     assert "✅ Борис пришел" not in button_texts
     assert "✅ Сергей пришел" not in button_texts
     assert "⬅️ К мероприятию" in button_texts
@@ -518,8 +532,8 @@ async def test_organizer_participants_book_paginates_eight_items(
 
     first_page = fake_bot.sent[-1]
     assert "Страница 1/2" in first_page["text"]
-    assert "8. Участник 08 - CODE08 - Записан" in first_page["text"]
-    assert "9. Участник 09 - CODE09 - Записан" not in first_page["text"]
+    assert "8. [Участник 08](max://user/108) - CODE08 - Записан" in first_page["text"]
+    assert "9. [Участник 09](max://user/109) - CODE09 - Записан" not in first_page["text"]
     first_buttons = {button["text"]: button for button in _buttons(first_page)}
     assert first_buttons["➡️ Далее"]["payload"] == Payload(
         "org_participants",
@@ -536,8 +550,8 @@ async def test_organizer_participants_book_paginates_eight_items(
 
     second_page = fake_bot.sent[-1]
     assert "Страница 2/2" in second_page["text"]
-    assert "9. Участник 09 - CODE09 - Записан" in second_page["text"]
-    assert "1. Участник 01 - CODE01 - Записан" not in second_page["text"]
+    assert "9. [Участник 09](max://user/109) - CODE09 - Записан" in second_page["text"]
+    assert "1. [Участник 01](max://user/101) - CODE01 - Записан" not in second_page["text"]
     second_buttons = {button["text"]: button for button in _buttons(second_page)}
     assert second_buttons["⬅️ Назад"]["payload"] == Payload(
         "org_participants",
@@ -579,8 +593,9 @@ async def test_organizer_participants_button_marks_attended_and_refreshes_page(
 
     message = fake_bot.sent[-1]
     assert storage.get_registration(registration.id).status == RegistrationStatus.ATTENDED
-    assert "1. Анна - ATND01 - Пришел" in message["text"]
+    assert "1. [Анна](max://user/101) - ATND01 - Пришел" in message["text"]
     assert "✅ Анна пришел" not in _button_texts(message)
+    assert "↩️ Анна записан" in _button_texts(message)
     notifications = [
         item
         for item in storage.list_notifications()
@@ -590,6 +605,24 @@ async def test_organizer_participants_button_marks_attended_and_refreshes_page(
     assert notifications[0].user_id == 101
     assert notifications[0].registration_id == registration.id
     assert "Организатор отметил, что вы пришли" in notifications[0].message_text
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload(
+            "org_participant_confirmed",
+            event_id=event.id,
+            registration_id=registration.id,
+            value="0",
+        ).pack(),
+    )
+
+    reverted = fake_bot.sent[-1]
+    assert storage.get_registration(registration.id).status == RegistrationStatus.CONFIRMED
+    assert "1. [Анна](max://user/101) - ATND01 - Записан" in reverted["text"]
+    assert "✅ Анна пришел" in _button_texts(reverted)
+    assert "↩️ Анна записан" not in _button_texts(reverted)
 
 
 async def test_builder_creates_event_with_slots_and_image(

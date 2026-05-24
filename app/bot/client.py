@@ -15,6 +15,7 @@ class BotClient(Protocol):
         text: str,
         attachments: list | None = None,
         notify: bool | None = None,
+        format: str | None = None,
     ) -> str | None:
         pass
 
@@ -25,6 +26,7 @@ class BotClient(Protocol):
         text: str,
         attachments: list | None = None,
         notify: bool | None = None,
+        format: str | None = None,
     ) -> str | None:
         pass
 
@@ -50,6 +52,7 @@ class MaxApiBotClient:
         text: str,
         attachments: list | None = None,
         notify: bool | None = None,
+        format: str | None = None,
     ) -> str | None:
         prepared_attachments = _adapt_attachments(attachments)
         result = await self.bot.send_message(
@@ -58,6 +61,7 @@ class MaxApiBotClient:
             text=text,
             attachments=prepared_attachments,
             notify=notify,
+            format=_adapt_text_format(format),
         )
         return _extract_message_id(result)
 
@@ -68,6 +72,7 @@ class MaxApiBotClient:
         text: str,
         attachments: list | None = None,
         notify: bool | None = None,
+        format: str | None = None,
     ) -> str | None:
         prepared_attachments = _adapt_attachments(attachments)
         await self.bot.edit_message(
@@ -75,6 +80,7 @@ class MaxApiBotClient:
             text=text,
             attachments=prepared_attachments,
             notify=notify,
+            format=_adapt_text_format(format),
         )
         return message_id
 
@@ -110,6 +116,22 @@ def _adapt_attachments(attachments: list | None) -> list | None:
         _RawAttachment(item) if isinstance(item, dict) else item
         for item in attachments
     ]
+
+
+def _adapt_text_format(format: str | None):
+    if format is None:
+        return None
+    try:
+        enums = importlib.import_module("maxapi.enums")
+    except ImportError:
+        return format
+    enum_class = getattr(enums, "TextFormat", None) or getattr(enums, "ParseMode", None)
+    if enum_class is None:
+        return format
+    try:
+        return enum_class(format)
+    except ValueError:
+        return format
 
 
 def local_image_attachment(path: str | Path):

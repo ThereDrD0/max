@@ -81,6 +81,7 @@ class FakeBotClient:
         text: str,
         attachments: list | None = None,
         notify: bool | None = None,
+        format: str | None = None,
     ) -> None:
         self.sent.append(
             {
@@ -89,6 +90,7 @@ class FakeBotClient:
                 "text": text,
                 "attachments": attachments or [],
                 "notify": notify,
+                "format": format,
             }
         )
         message_id = f"mid.{self._next_message_id}"
@@ -102,6 +104,7 @@ class FakeBotClient:
         text: str,
         attachments: list | None = None,
         notify: bool | None = None,
+        format: str | None = None,
     ) -> None:
         self.edited.append(
             {
@@ -109,6 +112,7 @@ class FakeBotClient:
                 "text": text,
                 "attachments": attachments or [],
                 "notify": notify,
+                "format": format,
             }
         )
         return message_id
