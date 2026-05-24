@@ -93,16 +93,16 @@ def render_reminder_message(
     lines = ["🔔 Напоминание о мероприятии"]
     if event is not None:
         starts_at = reminder_starts_at(event, registration)
-        lines.append(f"Начало: {format_moscow_datetime(starts_at)} ({starts_in})")
+        lines.append(f"📅 Начало: {format_moscow_datetime(starts_at)} ({starts_in})")
     if clean_custom_text:
         lines.extend(["", clean_custom_text])
-    lines.extend(["", title])
+    lines.extend(["", f"📚 {title}"])
     slot = reminder_slot(event, registration) if event is not None else registration.slot
     if slot is not None:
-        lines.append(f"Слот: {slot.title}")
-    lines.append(f"Код записи: {registration.code}")
+        lines.append(f"🕒 Слот: {slot.title}")
+    lines.append(f"🎫 Код записи: {registration.code}")
     if event is not None:
-        lines.append(f"Место/ссылка: {event.location_or_url}")
+        lines.append(f"📍 Место/ссылка: {event.location_or_url}")
     return "\n".join(lines)
 
 

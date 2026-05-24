@@ -63,8 +63,10 @@ def test_registration_creates_code_schedules_reminders_and_blocks_duplicates(
         event.starts_at,
     ]
     assert "🔔 Напоминание о мероприятии" in outbox[0].message_text
-    assert "Начало: 24.05.2026 12:00 (через 3 дня)" in outbox[0].message_text
-    assert "Код записи: ABC123" in outbox[0].message_text
+    assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in outbox[0].message_text
+    assert "📚 День открытых дверей ИТ" in outbox[0].message_text
+    assert "🎫 Код записи: ABC123" in outbox[0].message_text
+    assert "📍 Место/ссылка: Главный корпус, аудитория 101" in outbox[0].message_text
     assert all(item.status == OutboxStatus.PENDING for item in outbox)
 
     with pytest.raises(DuplicateActiveRegistrationError):
@@ -196,7 +198,7 @@ def test_slot_registration_schedules_reminders_from_slot_start(storage, fixed_no
         slot.starts_at - timedelta(hours=3),
         slot.starts_at,
     ]
-    assert "Слот: 11:00" in outbox[0].message_text
+    assert "🕒 Слот: 11:00" in outbox[0].message_text
 
 
 def test_sync_registration_reminders_backfills_only_future_items(

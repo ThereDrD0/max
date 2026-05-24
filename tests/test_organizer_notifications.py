@@ -124,10 +124,10 @@ def test_organizer_manual_reminder_can_target_single_slot_with_custom_text(
     assert created[0].kind == NotificationKind.MANUAL_REMINDER
     assert created[0].registration_id == first.id
     assert "🔔 Напоминание о мероприятии" in created[0].message_text
-    assert "Начало: 24.05.2026 12:00 (через 3 дня)" in created[0].message_text
+    assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in created[0].message_text
     assert "Возьмите с собой студенческий билет." in created[0].message_text
-    assert "Код записи: SLOT01" in created[0].message_text
-    assert "Слот: 10:00" in created[0].message_text
+    assert "🎫 Код записи: SLOT01" in created[0].message_text
+    assert "🕒 Слот: 10:00" in created[0].message_text
 
 
 def test_organizer_manual_reminder_uses_auto_text_when_custom_text_is_blank(
@@ -147,6 +147,6 @@ def test_organizer_manual_reminder_uses_auto_text_when_custom_text_is_blank(
     assert created[0].user_id == registration.user_id
     assert "скоро начнётся" not in created[0].message_text
     assert "🔔 Напоминание о мероприятии" in created[0].message_text
-    assert "Начало: 24.05.2026 12:00 (через 3 дня)" in created[0].message_text
+    assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in created[0].message_text
     assert event.title in created[0].message_text
-    assert f"Код записи: {registration.code}" in created[0].message_text
+    assert f"🎫 Код записи: {registration.code}" in created[0].message_text

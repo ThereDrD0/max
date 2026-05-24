@@ -72,7 +72,7 @@ async def test_notification_worker_sends_reminder_with_image_and_detail_button(
     assert sent_count == 1
     message = fake_bot.sent[-1]
     assert "🔔 Напоминание о мероприятии" in message["text"]
-    assert "Начало: 24.05.2026 12:00 (через 3 дня)" in message["text"]
+    assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in message["text"]
     assert any(
         getattr(attachment, "path", "").replace("\\", "/").endswith(
             "app/assets/notification-reminder.png"

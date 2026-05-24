@@ -40,8 +40,8 @@ def test_enqueue_test_reminders_uses_simulated_starts_in_text(storage, fixed_now
     )
 
     assert len(created) == 1
-    assert "Начало: 24.05.2026 12:00 (через 2 часа)" in created[0].message_text
-    assert "Код записи: TEST01" in created[0].message_text
+    assert "📅 Начало: 24.05.2026 12:00 (через 2 часа)" in created[0].message_text
+    assert "🎫 Код записи: TEST01" in created[0].message_text
 
 
 def test_powershell_test_reminder_script_invokes_python_module():
