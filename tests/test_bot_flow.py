@@ -340,7 +340,7 @@ async def test_catalog_hides_raw_ids_in_prod_and_keeps_buttons_short(
     buttons = _keyboard_rows(message)
     flattened = [button["text"] for row in buttons for button in row]
     assert "Очень длинное название" not in " ".join(flattened)
-    assert any(text.startswith("ℹ️ №1. ") for text in flattened)
+    assert any(text.startswith("1. ") for text in flattened)
     assert "Подробнее" not in " ".join(flattened)
     assert not any("📝" in text for text in flattened)
 
@@ -369,7 +369,7 @@ async def test_catalog_hides_full_events_and_omits_place_status(
     assert "🕒 90 мин. · очно" in message["text"]
     assert "⏱" not in message["text"]
     assert len(
-        [button for button in _buttons(message) if button["text"].startswith("ℹ️ №1. ")]
+        [button for button in _buttons(message) if button["text"].startswith("1. ")]
     ) == 1
 
 
@@ -391,7 +391,7 @@ async def test_catalog_opens_event_detail_before_booking(
 
     catalog_buttons = _keyboard_rows(fake_bot.sent[-1])
     catalog_texts = [button["text"] for row in catalog_buttons for button in row]
-    assert "ℹ️ №1. День открытых дверей..." in catalog_texts
+    assert "1. День открытых дверей..." in catalog_texts
     assert all("Подробнее" not in text for text in catalog_texts)
     assert all("📝" not in text for text in catalog_texts)
 
@@ -449,20 +449,22 @@ async def test_catalog_book_first_page_highlights_soon_events_without_duplicates
 
     buttons = _buttons(message)
     button_texts = [button["text"] for button in buttons]
-    detail_buttons = [text for text in button_texts if text.startswith("ℹ️ ")]
+    detail_buttons = [
+        text for text in button_texts if text[:1].isdigit() and text[1:3] == ". "
+    ]
     assert len(detail_buttons) == 6
     rows = _keyboard_rows(message)
     assert [button["text"] for button in rows[0]] == [
-        "ℹ️ №1. Событие 1",
-        "ℹ️ №2. Событие 2",
+        "1. Событие 1",
+        "2. Событие 2",
     ]
     assert [button["text"] for button in rows[1]] == [
-        "ℹ️ №3. Событие 3",
-        "ℹ️ №4. Событие 4",
+        "3. Событие 3",
+        "4. Событие 4",
     ]
     assert [button["text"] for button in rows[2]] == [
-        "ℹ️ №5. Событие 5",
-        "ℹ️ №6. Событие 6",
+        "5. Событие 5",
+        "6. Событие 6",
     ]
     assert "Подробнее" not in " ".join(button_texts)
     assert "🎫 Мои записи" not in button_texts
