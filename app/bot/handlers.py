@@ -62,7 +62,7 @@ DISCLAIMER_TEXT = (
 MAIN_MENU_HEADER_TEXT = (
     "Запись на мероприятия\n\n"
     "Здесь можно выбрать ближайшее мероприятие, записаться и потом быстро найти свою запись. "
-    "Если вы менеджер, откройте отдельное меню для создания и управления мероприятиями.\n\n"
+    "Если вы организатор, откройте отдельное меню для создания и управления мероприятиями.\n\n"
     "Команды:"
 )
 BASE_COMMAND_LINES = (
@@ -70,9 +70,9 @@ BASE_COMMAND_LINES = (
     "/events — показать ближайшие мероприятия",
     "/my или /records — показать мои записи",
 )
-MANAGER_COMMAND_LINES = (
-    "/organizer — открыть меню менеджера",
-    "/find КОД — найти запись по коду, доступно менеджерам",
+ORGANIZER_COMMAND_LINES = (
+    "/organizer — открыть меню организатора",
+    "/find КОД — найти запись по коду, доступно организаторам",
 )
 
 CATALOG_PAGE_SIZE = 6
@@ -473,7 +473,7 @@ class BotHandlers:
             [callback_button("🎫 Мои записи", Payload("my_regs"))],
         ]
         if self.organizer_service.can_use_menu(user_id):
-            rows.append([callback_button("🧑‍💼 Меню менеджера", Payload("org_menu"))])
+            rows.append([callback_button("🧑‍💼 Меню организатора", Payload("org_menu"))])
         await self._send(
             user_id=user_id,
             chat_id=chat_id,
@@ -493,7 +493,7 @@ class BotHandlers:
     def _available_commands_text(self, user_id: int) -> str:
         lines = list(BASE_COMMAND_LINES)
         if self.organizer_service.can_use_menu(user_id):
-            lines.extend(MANAGER_COMMAND_LINES)
+            lines.extend(ORGANIZER_COMMAND_LINES)
         return "\n".join(lines)
 
     async def _send_catalog(
@@ -514,7 +514,7 @@ class BotHandlers:
                     "📚 Книга мероприятий\n"
                     "Страница 1/1\n\n"
                     "Пока в книге нет ближайших мероприятий. Загляните позже: "
-                    "как только появятся новые события, они будут здесь."
+                    "как только появятся новые мероприятия, они будут здесь."
                 ),
                 attachments=[
                     local_image_attachment(MAIN_MENU_IMAGE_PATH),
@@ -555,7 +555,7 @@ class BotHandlers:
                 [
                     "",
                     "Здесь собраны все ближайшие мероприятия по датам: от самых скорых к дальним. "
-                    "Листайте книгу кнопками ниже и открывайте подробности любого события.",
+                    "Листайте книгу кнопками ниже и открывайте подробности любого мероприятия.",
                 ]
             )
             soon_events = page_events[:CATALOG_SOON_COUNT]

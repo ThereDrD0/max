@@ -77,7 +77,7 @@ async def test_main_menu_contains_image_commands_and_primary_buttons(
     assert message["text"] == (
         "Запись на мероприятия\n\n"
         "Здесь можно выбрать ближайшее мероприятие, записаться и потом быстро найти свою запись. "
-        "Если вы менеджер, откройте отдельное меню для создания и управления мероприятиями.\n\n"
+        "Если вы организатор, откройте отдельное меню для создания и управления мероприятиями.\n\n"
         "Команды:\n"
         "/start или /menu — открыть главное меню\n"
         "/events — показать ближайшие мероприятия\n"
@@ -88,12 +88,12 @@ async def test_main_menu_contains_image_commands_and_primary_buttons(
         "app/assets/main-menu.png"
     )
     assert _button_texts(message) == "📚 Мероприятия 🎫 Мои записи"
-    assert "Меню менеджера" not in message["text"]
+    assert "Меню организатора" not in message["text"]
     assert "/organizer" not in message["text"]
     assert "/find" not in message["text"]
 
 
-async def test_main_menu_shows_manager_actions_only_for_manager(
+async def test_main_menu_shows_organizer_actions_only_for_organizer(
     storage,
     fake_bot,
     fixed_now,
@@ -106,9 +106,9 @@ async def test_main_menu_shows_manager_actions_only_for_manager(
     await handlers.handle_message(501, "Организатор", 9003, "/start")
 
     message = fake_bot.sent[-1]
-    assert "/organizer — открыть меню менеджера" in message["text"]
-    assert "/find КОД — найти запись по коду, доступно менеджерам" in message["text"]
-    assert "🧑‍💼 Меню менеджера" in _button_texts(message)
+    assert "/organizer — открыть меню организатора" in message["text"]
+    assert "/find КОД — найти запись по коду, доступно организаторам" in message["text"]
+    assert "🧑‍💼 Меню организатора" in _button_texts(message)
 
 
 async def test_menu_command_opens_main_menu_for_user_with_consent(
@@ -165,7 +165,7 @@ async def test_main_menu_callback_returns_to_role_aware_main_menu(
     await handlers.handle_callback(101, "Анна", 9001, Payload("main_menu").pack())
 
     assert "Запись на мероприятия" in fake_bot.sent[-1]["text"]
-    assert "🧑‍💼 Меню менеджера" not in _button_texts(fake_bot.sent[-1])
+    assert "🧑‍💼 Меню организатора" not in _button_texts(fake_bot.sent[-1])
 
 
 async def test_unknown_command_lists_available_commands(storage, fake_bot, fixed_now):

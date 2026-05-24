@@ -10,6 +10,11 @@ from pathlib import Path
 BOT_DIR = Path(__file__).resolve().parents[1] / "app" / "bot"
 BUTTON_HELPERS = {"callback_button", "clipboard_button", "link_button"}
 TEXT_RETURN_HELPERS = {"_builder_cancel_button_text"}
+FORBIDDEN_GLOSSARY_TERMS = (
+    (re.compile(r"\bивент(?:ы|ов|ам|ами|ах|е|ом|а)?\b", re.IGNORECASE), "мероприятие"),
+    (re.compile(r"\bсобыти(?:е|я|ю|ем|и|й|ям|ями|ях)\b", re.IGNORECASE), "мероприятие"),
+    (re.compile(r"\bменеджер(?:ы|ов|ам|ами|ах|а|у|ом|е)?\b", re.IGNORECASE), "организатор"),
+)
 EMOJI_RE = re.compile(
     "["
     "\U0001F1E6-\U0001FAFF"
@@ -92,6 +97,17 @@ def test_all_bot_ui_texts_use_single_regular_spaces() -> None:
         f"{text.source}: {defect}"
         for text in _collect_ui_texts()
         for defect in _space_quality_defects(text.text)
+    ]
+
+    assert defects == []
+
+
+def test_all_bot_ui_texts_follow_glossary_terms() -> None:
+    defects = [
+        f"{text.source}: {pattern.pattern!r} -> используйте «{replacement}»: {text.text!r}"
+        for text in _collect_ui_texts()
+        for pattern, replacement in FORBIDDEN_GLOSSARY_TERMS
+        if pattern.search(text.text)
     ]
 
     assert defects == []
