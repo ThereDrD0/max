@@ -712,7 +712,7 @@ async def test_my_registrations_links_to_event_detail_and_marks_status_visually(
 
     message = fake_bot.sent[-1]
     buttons = _buttons(message)
-    assert "1. ℹ️ День открытых дверей ИТ-института" in message["text"]
+    assert "1.\nℹ️ День открытых дверей ИТ-института" in message["text"]
     assert "🎫 Код: OPEN01" in message["text"]
     assert "✅ Статус: Записан" in message["text"]
     assert "Статус: ✅" not in message["text"]
@@ -856,8 +856,8 @@ async def test_my_registrations_sort_by_event_date_closeness(
     )
 
     message = fake_bot.sent[-1]
-    assert message["text"].index("1. ℹ️ Вчерашнее посещение") < message["text"].index(
-        "2. ℹ️ Через три дня"
+    assert message["text"].index("1.\nℹ️ Вчерашнее посещение") < message["text"].index(
+        "2.\nℹ️ Через три дня"
     )
     assert "✅ Статус: Пришёл" in message["text"]
     assert "✅ Статус: Записан" in message["text"]

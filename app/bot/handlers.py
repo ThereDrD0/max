@@ -1451,7 +1451,8 @@ class BotHandlers:
                 else ""
             )
             lines.append(
-                f"\n{index}. ℹ️ {registration.event.title}\n"
+                f"\n{index}.\n"
+                f"ℹ️ {registration.event.title}\n"
                 f"🎫 Код: {registration.code}\n"
                 f"✅ Статус: {self._format_status_for_user(registration.status)}"
                 f"{closed_registration_text}"
