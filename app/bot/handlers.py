@@ -96,7 +96,7 @@ REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
 )
 
 CATALOG_PAGE_SIZE = 6
-MY_REGISTRATIONS_BOOK_PAGE_SIZE = 6
+MY_REGISTRATIONS_BOOK_PAGE_SIZE = 1
 ORGANIZER_BOOK_PAGE_SIZE = 6
 ADMIN_ORGANIZER_BOOK_PAGE_SIZE = 8
 PARTICIPANTS_BOOK_PAGE_SIZE = 8
@@ -1428,7 +1428,6 @@ class BotHandlers:
             return
         total_pages = max(ceil(len(registrations) / MY_REGISTRATIONS_BOOK_PAGE_SIZE), 1)
         page = max(min(page, total_pages - 1), 0)
-        first_offset = 1 + page * MY_REGISTRATIONS_BOOK_PAGE_SIZE
         page_start = page * MY_REGISTRATIONS_BOOK_PAGE_SIZE
         page_end = page_start + MY_REGISTRATIONS_BOOK_PAGE_SIZE
         page_registrations = registrations[
@@ -1439,58 +1438,51 @@ class BotHandlers:
             "",
             "Листайте книгу кнопками ниже и открывайте нужную запись.",
         ]
-        rows: list[list[dict]] = []
-        current_detail_row: list[dict] = []
-        for index, registration in enumerate(page_registrations, start=first_offset):
-            closed_registration_text = (
-                f"\n{REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT}"
-                if (
-                    registration.status in ACTIVE_REGISTRATION_STATUSES
-                    and registration.event.registration_closed
-                )
-                else ""
+        registration = page_registrations[0]
+        closed_registration_text = (
+            f"\n{REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT}"
+            if (
+                registration.status in ACTIVE_REGISTRATION_STATUSES
+                and registration.event.registration_closed
             )
-            lines.append(
-                f"\n{index}.\n"
-                f"ℹ️ {registration.event.title}\n"
-                f"🎫 Код: {registration.code}\n"
-                f"✅ Статус: {self._format_status_for_user(registration.status)}"
-                f"{closed_registration_text}"
-            )
-            is_active = registration.status in ACTIVE_REGISTRATION_STATUSES
-            intent = "positive" if is_active else "default"
-            current_detail_row.append(
-                callback_button(
-                    f"ℹ️ {index}. {self._short_button_title(registration.event.title)}",
-                    Payload(
-                        "event_detail",
-                        event_id=registration.event_id,
-                        value=str(page),
-                    ),
-                    intent=intent,
-                )
-            )
-            if len(current_detail_row) == 2:
-                rows.append(current_detail_row)
-                current_detail_row = []
-        if current_detail_row:
-            rows.append(current_detail_row)
+            else ""
+        )
+        lines.append(
+            f"\nℹ️ {registration.event.title}\n"
+            f"🎫 Код: {registration.code}\n"
+            f"✅ Статус: {self._format_status_for_user(registration.status)}"
+            f"{closed_registration_text}"
+        )
         self._append_page_footer(lines, page, total_pages)
 
         previous_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
-        rows.append(
+        intent = (
+            "positive"
+            if registration.status in ACTIVE_REGISTRATION_STATUSES
+            else "default"
+        )
+        rows: list[list[dict]] = [
             [
                 callback_button(
                     "⬅️ Назад",
                     Payload("my_regs", value=str(previous_page)),
                 ),
                 callback_button(
+                    "ℹ️ Подробнее",
+                    Payload(
+                        "event_detail",
+                        event_id=registration.event_id,
+                        value=str(page),
+                    ),
+                    intent=intent,
+                ),
+                callback_button(
                     "➡️ Далее",
                     Payload("my_regs", value=str(next_page)),
                 ),
             ]
-        )
+        ]
         rows.append([callback_button("📚 Каталог", Payload("catalog"))])
         rows.append([self._main_menu_button()])
         await self._send(

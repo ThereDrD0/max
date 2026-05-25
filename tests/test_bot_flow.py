@@ -712,7 +712,8 @@ async def test_my_registrations_links_to_event_detail_and_marks_status_visually(
 
     message = fake_bot.sent[-1]
     buttons = _buttons(message)
-    assert "1.\nℹ️ День открытых дверей ИТ-института" in message["text"]
+    assert "ℹ️ День открытых дверей ИТ-института" in message["text"]
+    assert "1.\nℹ️" not in message["text"]
     assert "🎫 Код: OPEN01" in message["text"]
     assert "✅ Статус: Записан" in message["text"]
     assert "Статус: ✅" not in message["text"]
@@ -721,8 +722,8 @@ async def test_my_registrations_links_to_event_detail_and_marks_status_visually(
     assert "Отменена пользователем" not in message["text"]
     assert "Онлайн-консультация" not in message["text"]
     assert storage.get_registration(canceled_registration.id) is None
-    assert "ℹ️ 1. День открытых дверей..." in _button_texts(message)
-    active_button = next(button for button in buttons if button["text"].startswith("ℹ️ 1"))
+    assert "ℹ️ Подробнее" in _button_texts(message)
+    active_button = next(button for button in buttons if button["text"] == "ℹ️ Подробнее")
     assert active_button["payload"] == Payload(
         "event_detail",
         event_id=active_event.id,
@@ -732,7 +733,7 @@ async def test_my_registrations_links_to_event_detail_and_marks_status_visually(
     assert not any(button["payload"].startswith("reg_cancel") for button in buttons)
 
 
-async def test_my_registrations_book_paginates_six_items_in_double_buttons(
+async def test_my_registrations_book_shows_one_record_with_three_part_navigation(
     storage,
     fake_bot,
     fixed_now,
@@ -742,16 +743,16 @@ async def test_my_registrations_book_paginates_six_items_in_double_buttons(
         fake_bot,
         now=lambda: fixed_now,
         app_env="prod",
-        code_generator=iter([f"REC{i:03d}" for i in range(1, 8)]).__next__,
+        code_generator=iter(["REC001", "REC002", "REC003"]).__next__,
     )
     handlers.registration_service.upsert_user(101, "Анна")
     handlers.registration_service.record_profile_consent(101, "docs")
     events = []
-    for day in range(1, 8):
+    for day, title in enumerate(["Мастер-класс", "Проверка", "Консультация"], start=1):
         event = create_event(
             storage,
             fixed_now,
-            title=f"Запись {day}",
+            title=title,
             starts_in=timedelta(days=day),
         )
         events.append(event)
@@ -766,27 +767,26 @@ async def test_my_registrations_book_paginates_six_items_in_double_buttons(
 
     first_page = fake_bot.sent[-1]
     assert "🎫 Книга моих записей" in first_page["text"]
-    assert "Страница 1/2" in first_page["text"]
-    assert first_page["text"].splitlines()[-1] == "Страница 1/2"
+    assert "Страница 1/3" in first_page["text"]
+    assert first_page["text"].splitlines()[-1] == "Страница 1/3"
     assert _has_uploaded_image(first_page)
-    for day in range(1, 7):
-        assert f"Запись {day}" in first_page["text"]
-    assert "Запись 7" not in first_page["text"]
+    assert "Мастер-класс" in first_page["text"]
+    assert "Проверка" not in first_page["text"]
+    assert "Консультация" not in first_page["text"]
+    assert "1.\nℹ️" not in first_page["text"]
     first_rows = _keyboard_rows(first_page)
     assert [button["text"] for button in first_rows[0]] == [
-        "ℹ️ 1. Запись 1",
-        "ℹ️ 2. Запись 2",
-    ]
-    assert [button["text"] for button in first_rows[1]] == [
-        "ℹ️ 3. Запись 3",
-        "ℹ️ 4. Запись 4",
-    ]
-    assert [button["text"] for button in first_rows[2]] == [
-        "ℹ️ 5. Запись 5",
-        "ℹ️ 6. Запись 6",
+        "⬅️ Назад",
+        "ℹ️ Подробнее",
+        "➡️ Далее",
     ]
     first_buttons = {button["text"]: button for button in _buttons(first_page)}
-    assert first_buttons["⬅️ Назад"]["payload"] == Payload("my_regs", value="1").pack()
+    assert first_buttons["⬅️ Назад"]["payload"] == Payload("my_regs", value="2").pack()
+    assert first_buttons["ℹ️ Подробнее"]["payload"] == Payload(
+        "event_detail",
+        event_id=events[0].id,
+        value="0",
+    ).pack()
     assert first_buttons["➡️ Далее"]["payload"] == Payload("my_regs", value="1").pack()
 
     await handlers.handle_callback(
@@ -797,18 +797,19 @@ async def test_my_registrations_book_paginates_six_items_in_double_buttons(
     )
 
     second_page = fake_bot.sent[-1]
-    assert "Страница 2/2" in second_page["text"]
-    assert second_page["text"].splitlines()[-1] == "Страница 2/2"
-    assert "Запись 7" in second_page["text"]
-    assert "Запись 1" not in second_page["text"]
+    assert "Страница 2/3" in second_page["text"]
+    assert second_page["text"].splitlines()[-1] == "Страница 2/3"
+    assert "Проверка" in second_page["text"]
+    assert "Мастер-класс" not in second_page["text"]
+    assert "Консультация" not in second_page["text"]
     second_buttons = {button["text"]: button for button in _buttons(second_page)}
-    assert second_buttons["ℹ️ 7. Запись 7"]["payload"] == Payload(
+    assert second_buttons["ℹ️ Подробнее"]["payload"] == Payload(
         "event_detail",
-        event_id=events[6].id,
+        event_id=events[1].id,
         value="1",
     ).pack()
     assert second_buttons["⬅️ Назад"]["payload"] == Payload("my_regs", value="0").pack()
-    assert second_buttons["➡️ Далее"]["payload"] == Payload("my_regs", value="0").pack()
+    assert second_buttons["➡️ Далее"]["payload"] == Payload("my_regs", value="2").pack()
 
 
 async def test_my_registrations_sort_by_event_date_closeness(
@@ -855,12 +856,32 @@ async def test_my_registrations_sort_by_event_date_closeness(
         payload=Payload("my_regs").pack(),
     )
 
-    message = fake_bot.sent[-1]
-    assert message["text"].index("1.\nℹ️ Вчерашнее посещение") < message["text"].index(
-        "2.\nℹ️ Через три дня"
+    first_page = fake_bot.sent[-1]
+    assert "ℹ️ Вчерашнее посещение" in first_page["text"]
+    assert "Через три дня" not in first_page["text"]
+    first_buttons = {button["text"]: button for button in _buttons(first_page)}
+    assert first_buttons["➡️ Далее"]["payload"] == Payload("my_regs", value="1").pack()
+    assert first_buttons["ℹ️ Подробнее"]["payload"] == Payload(
+        "event_detail",
+        event_id=attended_event.id,
+        value="0",
+    ).pack()
+    assert "✅ Статус: Пришёл" in first_page["text"]
+    assert "✅ Статус: Записан" not in first_page["text"]
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs", value="1").pack(),
     )
-    assert "✅ Статус: Пришёл" in message["text"]
-    assert "✅ Статус: Записан" in message["text"]
+
+    second_page = fake_bot.sent[-1]
+    assert "ℹ️ Через три дня" in second_page["text"]
+    assert "Вчерашнее посещение" not in second_page["text"]
+    assert second_page["text"].splitlines()[-1] == "Страница 2/2"
+    assert "✅ Статус: Пришёл" not in second_page["text"]
+    assert "✅ Статус: Записан" in second_page["text"]
 
 
 async def test_recent_attended_registration_stays_visible_with_readonly_detail(
