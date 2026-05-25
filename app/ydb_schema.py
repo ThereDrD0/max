@@ -113,6 +113,8 @@ SCHEMA_STATEMENTS = [
         id Int64 NOT NULL,
         user_id Int64,
         role Utf8,
+        created_at Timestamp,
+        created_by_user_id Int64,
         INDEX idx_roles_user GLOBAL ON (user_id),
         PRIMARY KEY (id)
     );
@@ -194,6 +196,11 @@ SCHEMA_STATEMENTS = [
     """,
 ]
 
+ROLE_ASSIGNMENT_COLUMNS = {
+    "created_at": "Timestamp",
+    "created_by_user_id": "Int64",
+}
+
 
 def create_driver(settings: Settings | None = None) -> ydb.Driver:
     resolved = settings or get_settings()
@@ -216,6 +223,32 @@ def ensure_schema(settings: Settings | None = None) -> None:
                 statement,
                 retry_settings=ydb.RetrySettings(idempotent=True),
             )
+        _ensure_role_assignment_columns(driver, pool, resolved)
+
+
+def _ensure_role_assignment_columns(
+    driver: ydb.Driver,
+    pool: ydb.QuerySessionPool,
+    settings: Settings,
+) -> None:
+    existing_columns = _table_columns(driver, settings, "role_assignments")
+    for column_name, column_type in ROLE_ASSIGNMENT_COLUMNS.items():
+        if column_name in existing_columns:
+            continue
+        pool.execute_with_retries(
+            f"ALTER TABLE role_assignments ADD COLUMN {column_name} {column_type};",
+            retry_settings=ydb.RetrySettings(idempotent=True),
+        )
+
+
+def _table_columns(
+    driver: ydb.Driver,
+    settings: Settings,
+    table_name: str,
+) -> set[str]:
+    table_path = f"{settings.ydb_database.rstrip('/')}/{table_name}"
+    description = driver.table_client.describe_table(table_path)
+    return {column.name for column in description.columns}
 
 
 def _credentials(settings: Settings):

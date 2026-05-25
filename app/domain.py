@@ -59,3 +59,15 @@ class EventStartInPastError(BotDomainError):
 
 class AttendanceMarkDeniedError(BotDomainError):
     pass
+
+
+class OrganizerAlreadyAssignedError(BotDomainError):
+    pass
+
+
+class OrganizerRoleNotFoundError(BotDomainError):
+    pass
+
+
+class ConfigManagedOrganizerError(BotDomainError):
+    pass

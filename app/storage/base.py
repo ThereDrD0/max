@@ -12,6 +12,7 @@ from app.storage.entities import (
     NotificationOutbox,
     OrganizerState,
     Registration,
+    RoleAssignment,
     User,
 )
 
@@ -190,9 +191,22 @@ class Storage(Protocol):
         event_id: int,
     ) -> Registration | None: ...
 
-    def ensure_role(self, user_id: int, role: str) -> None: ...
+    def ensure_role(
+        self,
+        user_id: int,
+        role: str,
+        *,
+        created_at: datetime | None = None,
+        created_by_user_id: int | None = None,
+    ) -> RoleAssignment: ...
+
+    def get_role(self, user_id: int, role: str) -> RoleAssignment | None: ...
+
+    def list_roles(self, role: str) -> list[RoleAssignment]: ...
 
     def has_role(self, user_id: int, role: str) -> bool: ...
+
+    def delete_role(self, user_id: int, role: str) -> bool: ...
 
     def ensure_organizer_event(self, user_id: int, event_id: int) -> None: ...
 

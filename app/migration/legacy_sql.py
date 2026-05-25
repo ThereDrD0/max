@@ -86,6 +86,12 @@ def export_legacy_database(source_database_url: str) -> MigrationSnapshot:
                     id=int(row["id"]),
                     user_id=int(row["user_id"]),
                     role=row["role"],
+                    created_at=_dt_or_none(row.get("created_at")),
+                    created_by_user_id=(
+                        int(row["created_by_user_id"])
+                        if row.get("created_by_user_id") is not None
+                        else None
+                    ),
                 )
                 for row in _rows(connection.execute(text("SELECT * FROM role_assignments")))
             ]

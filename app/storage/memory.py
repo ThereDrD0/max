@@ -540,15 +540,61 @@ class MemoryStorage:
             return None
         return self._registration_without_related_objects(registration)
 
-    def ensure_role(self, user_id: int, role: str) -> None:
+    def ensure_role(
+        self,
+        user_id: int,
+        role: str,
+        *,
+        created_at: datetime | None = None,
+        created_by_user_id: int | None = None,
+    ) -> RoleAssignment:
         with self._lock:
-            if any(item.user_id == user_id and item.role == role for item in self.roles.values()):
-                return
-            item = RoleAssignment(self._next_id("role"), user_id=user_id, role=role)
+            existing = self.get_role(user_id, role)
+            if existing is not None:
+                return existing
+            item = RoleAssignment(
+                self._next_id("role"),
+                user_id=user_id,
+                role=role,
+                created_at=created_at or utc_now(),
+                created_by_user_id=created_by_user_id,
+            )
             self.roles[item.id] = item
+            return item
+
+    def get_role(self, user_id: int, role: str) -> RoleAssignment | None:
+        return next(
+            (
+                item
+                for item in self.roles.values()
+                if item.user_id == user_id and item.role == role
+            ),
+            None,
+        )
+
+    def list_roles(self, role: str) -> list[RoleAssignment]:
+        return sorted(
+            [item for item in self.roles.values() if item.role == role],
+            key=lambda item: (
+                item.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                item.user_id,
+            ),
+        )
 
     def has_role(self, user_id: int, role: str) -> bool:
-        return any(item.user_id == user_id and item.role == role for item in self.roles.values())
+        return self.get_role(user_id, role) is not None
+
+    def delete_role(self, user_id: int, role: str) -> bool:
+        with self._lock:
+            item = self.get_role(user_id, role)
+            if item is None:
+                return False
+            self.roles.pop(item.id, None)
+            if role == "organizer":
+                for item_id, organizer_event in list(self.organizer_events.items()):
+                    if organizer_event.user_id == user_id:
+                        self.organizer_events.pop(item_id, None)
+            return True
 
     def ensure_organizer_event(self, user_id: int, event_id: int) -> None:
         with self._lock:

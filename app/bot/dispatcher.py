@@ -26,6 +26,7 @@ async def dispatch_update(
         documents_version=settings.documents_version,
         app_env=settings.app_env,
         max_bot_username=settings.max_bot_username,
+        organizer_config_user_ids=settings.organizer_user_ids,
     )
     update_type = update.get("update_type")
     set_trace_metadata(

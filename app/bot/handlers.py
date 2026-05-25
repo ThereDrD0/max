@@ -32,12 +32,15 @@ from app.domain import (
     AccessDeniedError,
     AttendanceMarkDeniedError,
     BotDomainError,
+    ConfigManagedOrganizerError,
     ConsentRequiredError,
     DuplicateActiveRegistrationError,
     DuplicateEventSlugError,
     EventStartInPastError,
     LateCancellationDeniedError,
     NoSeatsAvailableError,
+    OrganizerAlreadyAssignedError,
+    OrganizerRoleNotFoundError,
     RegistrationClosedError,
     RegistrationNotFoundError,
     SlotNotFoundError,
@@ -49,6 +52,7 @@ from app.enums import (
     NotificationKind,
     RegistrationStatus,
 )
+from app.services.admin import AdminService
 from app.services.event_cleanup import ORGANIZER_EVENT_RETENTION_DAYS
 from app.services.organizer import OrganizerService
 from app.services.registration import CodeGenerator, RegistrationService
@@ -58,7 +62,7 @@ from app.services.registration_codes import (
 )
 from app.observability.performance import measure
 from app.storage.base import Storage
-from app.storage.entities import Event, EventSlot, OrganizerState, Registration
+from app.storage.entities import Event, EventSlot, OrganizerState, Registration, RoleAssignment
 
 
 DISCLAIMER_TEXT = (
@@ -83,6 +87,9 @@ ORGANIZER_COMMAND_LINES = (
     "/organizer — открыть меню организатора",
     "/find КОД — найти запись по коду, доступно организаторам",
 )
+ADMIN_COMMAND_LINES = (
+    "/admin — открыть меню администратора",
+)
 REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
     "Регистрация новых участников закрыта. "
     "Ваша запись действует: вы участвуете в мероприятии."
@@ -90,8 +97,10 @@ REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
 
 CATALOG_PAGE_SIZE = 6
 ORGANIZER_BOOK_PAGE_SIZE = 6
+ADMIN_ORGANIZER_BOOK_PAGE_SIZE = 8
 PARTICIPANTS_BOOK_PAGE_SIZE = 8
 ORGANIZER_BOOK_BUTTON_TITLE_MAX_CHARS = 30
+ADMIN_ORGANIZER_BUTTON_TITLE_MAX_CHARS = 24
 PARTICIPANT_BUTTON_NAME_MAX_CHARS = 24
 CATALOG_SOON_COUNT = 3
 _SEND_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
@@ -104,6 +113,8 @@ STATE_EDIT_TIME = "edit_time"
 STATE_EDIT_PLACE = "edit_place"
 STATE_MANUAL_REMINDER_TEXT = "manual_reminder_text"
 STATE_ATTENDANCE_LOOKUP = "attendance_lookup"
+STATE_ADMIN_ADD_ORGANIZER = "admin_add_organizer"
+STATE_ADMIN_REMOVE_ORGANIZER = "admin_remove_organizer"
 CREATE_EVENT_BUTTON_TEXT = "📝 Создать мероприятие"
 TAKE_CURRENT_TEXT = "♻️ ВЗЯТЬ ТЕКУЩЕЕ"
 
@@ -130,6 +141,7 @@ class BotHandlers:
         documents_version: str = "hackathon-2026-05",
         app_env: str = "local",
         max_bot_username: str = "",
+        organizer_config_user_ids: list[int] | tuple[int, ...] = (),
     ) -> None:
         self.storage = storage
         self.bot = bot_client
@@ -145,6 +157,11 @@ class BotHandlers:
             code_generator=code_generator,
         )
         self.organizer_service = OrganizerService(storage, now=self.now)
+        self.admin_service = AdminService(
+            storage,
+            organizer_config_user_ids=organizer_config_user_ids,
+            now=self.now,
+        )
 
     async def handle_bot_started(
         self,
@@ -176,6 +193,11 @@ class BotHandlers:
                 self.storage.clear_organizer_state(user_id)
                 self.storage.clear_pending_event_image(user_id)
                 await self._send_organizer_menu(user_id, chat_id)
+                return
+            if normalized == "/admin":
+                self.storage.clear_organizer_state(user_id)
+                self.storage.clear_pending_event_image(user_id)
+                await self._send_admin_menu(user_id, chat_id)
                 return
             organizer_state = self.storage.get_organizer_state(user_id)
             if organizer_state is not None:
@@ -318,6 +340,62 @@ class BotHandlers:
             )
             text = "🔔 Уведомления по этой записи включены." if enabled else "🔕 Уведомления по этой записи отключены."
             await self._send(user_id=user_id, chat_id=chat_id, text=text)
+        elif data.action == "admin_menu":
+            self.storage.clear_organizer_state(user_id)
+            await self._send_admin_menu(user_id, chat_id)
+        elif data.action == "admin_org_add":
+            await self._start_admin_organizer_input(
+                user_id,
+                chat_id,
+                mode=STATE_ADMIN_ADD_ORGANIZER,
+            )
+        elif data.action == "admin_org_remove":
+            await self._start_admin_organizer_input(
+                user_id,
+                chat_id,
+                mode=STATE_ADMIN_REMOVE_ORGANIZER,
+            )
+        elif data.action == "admin_org_list":
+            self.storage.clear_organizer_state(user_id)
+            await self._send_admin_organizer_list(
+                user_id,
+                chat_id,
+                page=self._payload_page(data),
+            )
+        elif data.action == "admin_org_detail" and data.event_id is not None:
+            self.storage.clear_organizer_state(user_id)
+            await self._send_admin_organizer_detail(
+                user_id,
+                chat_id,
+                data.event_id,
+                page=self._payload_page(data),
+            )
+        elif data.action == "admin_org_remove_confirm" and data.event_id is not None:
+            self.storage.clear_organizer_state(user_id)
+            await self._send_admin_organizer_remove_confirmation(
+                user_id,
+                chat_id,
+                data.event_id,
+                page=self._payload_page(data),
+            )
+        elif data.action == "admin_org_remove_apply" and data.event_id is not None:
+            removed = self.admin_service.remove_organizer(user_id, data.event_id)
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=f"Организатор {self._admin_user_label(removed.user_id)} удален.",
+                attachments=inline_keyboard(
+                    [
+                        [
+                            callback_button(
+                                "📚 К списку",
+                                Payload("admin_org_list", value=data.value),
+                            )
+                        ],
+                        [callback_button("⬅️ В меню администратора", Payload("admin_menu"))],
+                    ]
+                ),
+            )
         elif data.action == "org_menu":
             self.storage.clear_organizer_state(user_id)
             await self._send_organizer_menu(
@@ -609,16 +687,23 @@ class BotHandlers:
 
     async def _send_main_menu(self, user_id: int, chat_id: int | None) -> None:
         can_use_organizer_menu = self.organizer_service.can_use_menu(user_id)
+        can_use_admin_menu = self.admin_service.can_use_menu(user_id)
         rows = [
             [callback_button("📚 Мероприятия", Payload("catalog"))],
             [callback_button("🎫 Мои записи", Payload("my_regs"))],
         ]
         if can_use_organizer_menu:
             rows.append([callback_button("🧑‍💼 Меню организатора", Payload("org_menu"))])
+        if can_use_admin_menu:
+            rows.append([callback_button("🛠️ Меню администратора", Payload("admin_menu"))])
         await self._send(
             user_id=user_id,
             chat_id=chat_id,
-            text=self._main_menu_text(user_id, can_use_organizer_menu=can_use_organizer_menu),
+            text=self._main_menu_text(
+                user_id,
+                can_use_organizer_menu=can_use_organizer_menu,
+                can_use_admin_menu=can_use_admin_menu,
+            ),
             attachments=[
                 image_attachment(BotImageAsset.MAIN_MENU),
                 *inline_keyboard(rows),
@@ -630,11 +715,14 @@ class BotHandlers:
         user_id: int,
         *,
         can_use_organizer_menu: bool | None = None,
+        can_use_admin_menu: bool | None = None,
     ) -> str:
-        return (
-            f"{MAIN_MENU_HEADER_TEXT}\n"
-            f"{self._available_commands_text(user_id, can_use_organizer_menu=can_use_organizer_menu)}"
+        command_text = self._available_commands_text(
+            user_id,
+            can_use_organizer_menu=can_use_organizer_menu,
+            can_use_admin_menu=can_use_admin_menu,
         )
+        return f"{MAIN_MENU_HEADER_TEXT}\n{command_text}"
 
     def _unknown_command_text(self, user_id: int) -> str:
         return f"Я понимаю команды:\n{self._available_commands_text(user_id)}"
@@ -644,13 +732,345 @@ class BotHandlers:
         user_id: int,
         *,
         can_use_organizer_menu: bool | None = None,
+        can_use_admin_menu: bool | None = None,
     ) -> str:
         lines = list(BASE_COMMAND_LINES)
         if can_use_organizer_menu is None:
             can_use_organizer_menu = self.organizer_service.can_use_menu(user_id)
+        if can_use_admin_menu is None:
+            can_use_admin_menu = self.admin_service.can_use_menu(user_id)
         if can_use_organizer_menu:
             lines.extend(ORGANIZER_COMMAND_LINES)
+        if can_use_admin_menu:
+            lines.extend(ADMIN_COMMAND_LINES)
         return "\n".join(lines)
+
+    async def _send_admin_menu(self, user_id: int, chat_id: int | None) -> None:
+        if not self.admin_service.can_use_menu(user_id):
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text="У вас нет доступа к меню администратора.",
+                attachments=inline_keyboard([[self._main_menu_button()]]),
+            )
+            return
+        rows = [
+            [
+                callback_button("➕ Добавить Организатора", Payload("admin_org_add")),
+                callback_button("➖ Удалить Организатора", Payload("admin_org_remove")),
+            ],
+            [callback_button("📚 Список Организаторов", Payload("admin_org_list"))],
+            [self._main_menu_button()],
+        ]
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=(
+                "🛠️ Меню администратора\n\n"
+                "Здесь можно добавлять и удалять Организаторов, а также смотреть "
+                "текущий список."
+            ),
+            attachments=[
+                image_attachment(BotImageAsset.ORGANIZER_MENU),
+                *inline_keyboard(rows),
+            ],
+        )
+
+    async def _start_admin_organizer_input(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        *,
+        mode: str,
+    ) -> None:
+        if not self.admin_service.can_use_menu(user_id):
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text="У вас нет доступа к меню администратора.",
+                attachments=inline_keyboard([[self._main_menu_button()]]),
+            )
+            return
+        state = OrganizerState(
+            user_id=user_id,
+            mode=mode,
+            event_id=None,
+            step=mode,
+            data={},
+            updated_at=self.now(),
+        )
+        self.storage.set_organizer_state(state)
+        await self._send_admin_organizer_input_prompt(user_id, chat_id, state)
+
+    async def _handle_admin_organizer_input_message(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        state: OrganizerState,
+        text: str,
+    ) -> None:
+        target_user_id = self._parse_admin_target_user_id(text)
+        if target_user_id is None:
+            await self._send_admin_organizer_input_prompt(
+                user_id,
+                chat_id,
+                state,
+                prefix=self._admin_target_parse_error(text),
+            )
+            return
+        try:
+            if state.mode == STATE_ADMIN_ADD_ORGANIZER:
+                role = self.admin_service.add_organizer(user_id, target_user_id)
+                self.storage.clear_organizer_state(user_id)
+                await self._send(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    text=(
+                        f"Организатор {self._admin_user_label(role.user_id)} "
+                        "добавлен."
+                    ),
+                    attachments=inline_keyboard(
+                        [
+                            [
+                                callback_button(
+                                    "📚 Список Организаторов",
+                                    Payload("admin_org_list"),
+                                )
+                            ],
+                            [callback_button("⬅️ В меню администратора", Payload("admin_menu"))],
+                        ]
+                    ),
+                )
+                return
+            role = self.admin_service.remove_organizer(user_id, target_user_id)
+            self.storage.clear_organizer_state(user_id)
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=f"Организатор {self._admin_user_label(role.user_id)} удален.",
+                attachments=inline_keyboard(
+                    [
+                        [callback_button("📚 Список Организаторов", Payload("admin_org_list"))],
+                        [callback_button("⬅️ В меню администратора", Payload("admin_menu"))],
+                    ]
+                ),
+            )
+        except BotDomainError as exc:
+            await self._send_admin_organizer_input_prompt(
+                user_id,
+                chat_id,
+                state,
+                prefix=self._friendly_error(exc),
+            )
+
+    async def _send_admin_organizer_input_prompt(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        state: OrganizerState,
+        *,
+        prefix: str | None = None,
+    ) -> None:
+        action_text = (
+            "добавить Организатора"
+            if state.mode == STATE_ADMIN_ADD_ORGANIZER
+            else "удалить Организатора"
+        )
+        text = (
+            f"Чтобы {action_text}, отправьте MAX ID числом или ссылку вида "
+            "max://user/123."
+        )
+        if prefix:
+            text = f"{prefix}\n\n{text}"
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=text,
+            attachments=inline_keyboard(
+                [[callback_button("⬅️ В меню администратора", Payload("admin_menu"))]]
+            ),
+        )
+
+    async def _send_admin_organizer_list(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        *,
+        page: int = 0,
+    ) -> None:
+        roles = self.admin_service.list_organizers(user_id)
+        rows: list[list[dict]] = []
+        if not roles:
+            await self._send(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=(
+                    "📚 Книга Организаторов\n"
+                    "Страница 1/1\n\n"
+                    "Пока Организаторов нет."
+                ),
+                attachments=[
+                    image_attachment(BotImageAsset.ORGANIZER_MENU),
+                    *inline_keyboard(
+                        [[callback_button("⬅️ В меню администратора", Payload("admin_menu"))]]
+                    ),
+                ],
+            )
+            return
+
+        total_pages = max(ceil(len(roles) / ADMIN_ORGANIZER_BOOK_PAGE_SIZE), 1)
+        page = max(min(page, total_pages - 1), 0)
+        first_offset = 1 + page * ADMIN_ORGANIZER_BOOK_PAGE_SIZE
+        page_roles = roles[
+            page * ADMIN_ORGANIZER_BOOK_PAGE_SIZE : (page + 1) * ADMIN_ORGANIZER_BOOK_PAGE_SIZE
+        ]
+        lines = [
+            "📚 Книга Организаторов",
+            f"Страница {page + 1}/{total_pages}",
+            "",
+            "Листайте книгу кнопками ниже и открывайте нужного Организатора.",
+        ]
+        current_row: list[dict] = []
+        for offset, role in enumerate(page_roles, start=first_offset):
+            lines.append(
+                f"\n{offset}. {self._admin_profile_link(role.user_id)}\n"
+                f"Добавлен: {self._role_created_at_text(role)}"
+            )
+            button_title = self._short_button_title(
+                self._admin_user_label(role.user_id),
+                max_chars=ADMIN_ORGANIZER_BUTTON_TITLE_MAX_CHARS,
+            )
+            current_row.append(
+                callback_button(
+                    f"⚙️ {offset}. {button_title}",
+                    Payload(
+                        "admin_org_detail",
+                        event_id=role.user_id,
+                        value=str(page),
+                    ),
+                )
+            )
+            if len(current_row) == 2:
+                rows.append(current_row)
+                current_row = []
+        if current_row:
+            rows.append(current_row)
+
+        previous_page = (page - 1) % total_pages
+        next_page = (page + 1) % total_pages
+        rows.append(
+            [
+                callback_button(
+                    "⬅️ Назад",
+                    Payload("admin_org_list", value=str(previous_page)),
+                ),
+                callback_button(
+                    "➡️ Далее",
+                    Payload("admin_org_list", value=str(next_page)),
+                ),
+            ]
+        )
+        rows.append([callback_button("⬅️ В меню администратора", Payload("admin_menu"))])
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text="\n".join(lines),
+            attachments=[
+                image_attachment(BotImageAsset.ORGANIZER_MENU),
+                *inline_keyboard(rows),
+            ],
+            format="markdown",
+        )
+
+    async def _send_admin_organizer_detail(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        organizer_user_id: int,
+        *,
+        page: int = 0,
+    ) -> None:
+        role = self.admin_service.get_organizer(user_id, organizer_user_id)
+        text = (
+            "🧑‍💼 Управление Организатором\n\n"
+            f"Аккаунт: {self._admin_profile_link(role.user_id)}\n"
+            f"Когда добавлен: {self._role_created_at_text(role)}\n"
+            f"Кем добавлен: {self._role_created_by_text(role)}"
+        )
+        rows = [
+            [
+                callback_button(
+                    "➖ Удалить Организатора",
+                    Payload(
+                        "admin_org_remove_confirm",
+                        event_id=role.user_id,
+                        value=str(page),
+                    ),
+                    intent="negative",
+                )
+            ],
+            [
+                callback_button(
+                    "📚 К списку",
+                    Payload("admin_org_list", value=str(page)),
+                )
+            ],
+            [callback_button("⬅️ В меню администратора", Payload("admin_menu"))],
+        ]
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=text,
+            attachments=[
+                image_attachment(BotImageAsset.ORGANIZER_MENU),
+                *inline_keyboard(rows),
+            ],
+            format="markdown",
+        )
+
+    async def _send_admin_organizer_remove_confirmation(
+        self,
+        user_id: int,
+        chat_id: int | None,
+        organizer_user_id: int,
+        *,
+        page: int = 0,
+    ) -> None:
+        role = self.admin_service.get_organizer(user_id, organizer_user_id)
+        await self._send(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=(
+                "Удалить Организатора?\n\n"
+                f"Аккаунт: {self._admin_profile_link(role.user_id)}"
+            ),
+            attachments=inline_keyboard(
+                [
+                    [
+                        callback_button(
+                            "➖ Удалить",
+                            Payload(
+                                "admin_org_remove_apply",
+                                event_id=role.user_id,
+                                value=str(page),
+                            ),
+                            intent="negative",
+                        )
+                    ],
+                    [
+                        callback_button(
+                            "⬅️ К Организатору",
+                            Payload(
+                                "admin_org_detail",
+                                event_id=role.user_id,
+                                value=str(page),
+                            ),
+                        )
+                    ],
+                ]
+            ),
+            format="markdown",
+        )
 
     async def _send_catalog(
         self,
@@ -1939,6 +2359,14 @@ class BotHandlers:
         if state.mode == STATE_ATTENDANCE_LOOKUP:
             await self._handle_attendance_lookup_message(user_id, chat_id, state, text)
             return
+        if state.mode in {STATE_ADMIN_ADD_ORGANIZER, STATE_ADMIN_REMOVE_ORGANIZER}:
+            await self._handle_admin_organizer_input_message(
+                user_id,
+                chat_id,
+                state,
+                text,
+            )
+            return
         if state.mode in {BUILDER_MODE_CREATE, BUILDER_MODE_EDIT}:
             await self._handle_builder_message(user_id, chat_id, state, text, attachments)
             return
@@ -2662,6 +3090,12 @@ class BotHandlers:
             return "Дата и время мероприятия уже прошли."
         if isinstance(exc, AttendanceMarkDeniedError):
             return "Отмененную запись нельзя отметить как пришедшую."
+        if isinstance(exc, OrganizerAlreadyAssignedError):
+            return "Этот пользователь уже Организатор."
+        if isinstance(exc, OrganizerRoleNotFoundError):
+            return "Этот пользователь не является Организатором."
+        if isinstance(exc, ConfigManagedOrganizerError):
+            return "Этот Организатор задан через конфиг. Уберите его из ORGANIZER_USER_IDS."
         return str(exc)
 
     @staticmethod
@@ -2715,6 +3149,41 @@ class BotHandlers:
     def _participant_profile_link(cls, registration: Registration) -> str:
         name = cls._markdown_link_text(cls._participant_name(registration))
         return f"[{name}](max://user/{registration.user_id})"
+
+    def _admin_profile_link(self, user_id: int) -> str:
+        name = self._markdown_link_text(self._admin_user_label(user_id))
+        return f"[{name}](max://user/{user_id})"
+
+    def _admin_user_label(self, user_id: int) -> str:
+        user = self.storage.get_user(user_id)
+        if user is not None and user.display_name.strip():
+            return user.display_name.strip()
+        return f"MAX ID {user_id}"
+
+    def _role_created_at_text(self, role: RoleAssignment) -> str:
+        if role.created_at is None:
+            return "неизвестно"
+        return self._format_datetime(role.created_at)
+
+    def _role_created_by_text(self, role: RoleAssignment) -> str:
+        if self.admin_service.is_config_managed_organizer(role.user_id):
+            return "СИСТЕМА"
+        if role.created_by_user_id is None:
+            return "неизвестно"
+        return self._admin_profile_link(role.created_by_user_id)
+
+    @classmethod
+    def _parse_admin_target_user_id(cls, value: str) -> int | None:
+        normalized = (value or "").strip()
+        if normalized.isdecimal():
+            return int(normalized)
+        return extract_max_user_id(normalized)
+
+    @classmethod
+    def _admin_target_parse_error(cls, value: str) -> str:
+        if cls._looks_like_max_profile_link(value):
+            return "Не нашел MAX ID в ссылке. Отправьте MAX ID числом или max://user/123."
+        return "Не разобрал MAX ID. Отправьте число или ссылку max://user/123."
 
     @staticmethod
     def _markdown_text(value: str) -> str:

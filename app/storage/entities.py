@@ -39,6 +39,8 @@ class RoleAssignment:
     id: int
     user_id: int
     role: str
+    created_at: datetime | None = None
+    created_by_user_id: int | None = None
 
 
 @dataclass(slots=True)

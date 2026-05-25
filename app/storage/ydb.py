@@ -788,43 +788,90 @@ class YdbStorage:
             return None
         return registration
 
-    def ensure_role(self, user_id: int, role: str) -> None:
-        row = self._one(
-            """
-            DECLARE $user_id AS Int64;
-            DECLARE $role AS Utf8;
-            SELECT id FROM role_assignments VIEW idx_roles_user
-            WHERE user_id = $user_id AND role = $role
-            LIMIT 1;
-            """,
-            {"$user_id": _int(user_id), "$role": _utf8(role)},
+    def ensure_role(
+        self,
+        user_id: int,
+        role: str,
+        *,
+        created_at: datetime | None = None,
+        created_by_user_id: int | None = None,
+    ) -> RoleAssignment:
+        existing = self.get_role(user_id, role)
+        if existing is not None:
+            return existing
+        item = RoleAssignment(
+            id=self._new_id("role_assignments"),
+            user_id=user_id,
+            role=role,
+            created_at=created_at or utc_now(),
+            created_by_user_id=created_by_user_id,
         )
-        if row is not None:
-            return
-        item = RoleAssignment(id=self._new_id("role_assignments"), user_id=user_id, role=role)
         self._execute(
             """
             DECLARE $id AS Int64;
             DECLARE $user_id AS Int64;
             DECLARE $role AS Utf8;
-            UPSERT INTO role_assignments (id, user_id, role)
-            VALUES ($id, $user_id, $role);
+            DECLARE $created_at AS Optional<Timestamp>;
+            DECLARE $created_by_user_id AS Optional<Int64>;
+            UPSERT INTO role_assignments (
+                id, user_id, role, created_at, created_by_user_id
+            )
+            VALUES (
+                $id, $user_id, $role, $created_at, $created_by_user_id
+            );
             """,
             _role_params(item),
         )
+        return item
 
-    def has_role(self, user_id: int, role: str) -> bool:
+    def get_role(self, user_id: int, role: str) -> RoleAssignment | None:
         row = self._one(
             """
             DECLARE $user_id AS Int64;
             DECLARE $role AS Utf8;
-            SELECT id FROM role_assignments VIEW idx_roles_user
+            SELECT * FROM role_assignments VIEW idx_roles_user
             WHERE user_id = $user_id AND role = $role
             LIMIT 1;
             """,
             {"$user_id": _int(user_id), "$role": _utf8(role)},
         )
-        return row is not None
+        return _role(row) if row is not None else None
+
+    def list_roles(self, role: str) -> list[RoleAssignment]:
+        rows = self._query(
+            """
+            DECLARE $role AS Utf8;
+            SELECT * FROM role_assignments
+            WHERE role = $role
+            ORDER BY created_at, user_id;
+            """,
+            {"$role": _utf8(role)},
+        )
+        return [_role(row) for row in rows]
+
+    def has_role(self, user_id: int, role: str) -> bool:
+        return self.get_role(user_id, role) is not None
+
+    def delete_role(self, user_id: int, role: str) -> bool:
+        item = self.get_role(user_id, role)
+        if item is None:
+            return False
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DELETE FROM role_assignments WHERE id = $id;
+            """,
+            {"$id": _int(item.id)},
+        )
+        if role == "organizer":
+            self._execute(
+                """
+                DECLARE $user_id AS Int64;
+                DELETE FROM organizer_events WHERE user_id = $user_id;
+                """,
+                {"$user_id": _int(user_id)},
+            )
+        return True
 
     def ensure_organizer_event(self, user_id: int, event_id: int) -> None:
         row = self._one(
@@ -1324,8 +1371,14 @@ class YdbStorage:
                 DECLARE $id AS Int64;
                 DECLARE $user_id AS Int64;
                 DECLARE $role AS Utf8;
-                UPSERT INTO role_assignments (id, user_id, role)
-                VALUES ($id, $user_id, $role);
+                DECLARE $created_at AS Optional<Timestamp>;
+                DECLARE $created_by_user_id AS Optional<Int64>;
+                UPSERT INTO role_assignments (
+                    id, user_id, role, created_at, created_by_user_id
+                )
+                VALUES (
+                    $id, $user_id, $role, $created_at, $created_by_user_id
+                );
                 """,
                 _role_params(role),
             )
@@ -2480,6 +2533,20 @@ def _user(row) -> User:
     )
 
 
+def _role(row) -> RoleAssignment:
+    return RoleAssignment(
+        id=int(row["id"]),
+        user_id=int(row["user_id"]),
+        role=row.get("role") or "",
+        created_at=_row_dt(row, "created_at"),
+        created_by_user_id=(
+            int(row["created_by_user_id"])
+            if row.get("created_by_user_id") is not None
+            else None
+        ),
+    )
+
+
 def _event(row) -> Event:
     return Event(
         id=int(row["id"]),
@@ -2645,7 +2712,13 @@ def _notification_params(item: NotificationOutbox) -> dict:
 
 
 def _role_params(item: RoleAssignment) -> dict:
-    return {"$id": _int(item.id), "$user_id": _int(item.user_id), "$role": _utf8(item.role)}
+    return {
+        "$id": _int(item.id),
+        "$user_id": _int(item.user_id),
+        "$role": _utf8(item.role),
+        "$created_at": _opt_timestamp(item.created_at),
+        "$created_by_user_id": _opt_int(item.created_by_user_id),
+    }
 
 
 def _organizer_event_params(item: OrganizerEvent) -> dict:
