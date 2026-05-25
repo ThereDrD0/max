@@ -227,7 +227,13 @@ class YdbStorage:
             event.slots.append(slot)
         return event
 
-    def get_event(self, event_id: int) -> Event | None:
+    def get_event(
+        self,
+        event_id: int,
+        *,
+        with_slots: bool = True,
+        with_image: bool = True,
+    ) -> Event | None:
         row = self._one(
             """
             DECLARE $id AS Int64;
@@ -238,8 +244,10 @@ class YdbStorage:
         if row is None:
             return None
         event = _event(row)
-        event.slots = self._event_slots(event.id)
-        self._attach_event_image(event)
+        if with_slots:
+            event.slots = self._event_slots(event.id)
+        if with_image:
+            self._attach_event_image(event)
         return event
 
     def assign_event_slug(
@@ -501,7 +509,13 @@ class YdbStorage:
             {"$user_id": _int(user_id)},
         )
 
-    def list_events(self, *, starts_at_from: datetime | None = None) -> list[Event]:
+    def list_events(
+        self,
+        *,
+        starts_at_from: datetime | None = None,
+        with_slots: bool = True,
+        with_images: bool = True,
+    ) -> list[Event]:
         if starts_at_from is None:
             rows = self._query("SELECT * FROM events ORDER BY starts_at;")
         else:
@@ -516,8 +530,10 @@ class YdbStorage:
             )
         events = [_event(row) for row in rows]
         for event in events:
-            event.slots = self._event_slots(event.id)
-            self._attach_event_image(event)
+            if with_slots:
+                event.slots = self._event_slots(event.id)
+            if with_images:
+                self._attach_event_image(event)
         return events
 
     def delete_expired_events(self, *, expired_before: datetime) -> int:
@@ -538,7 +554,10 @@ class YdbStorage:
         event = self._require_event(event_id)
         if event.slots:
             if slot_id is None:
-                return sum(self.available_places(event_id, slot.id) for slot in event.slots)
+                return sum(
+                    max(slot.capacity - slot.booked_count, 0)
+                    for slot in event.slots
+                )
             slot = self._require_slot(event, slot_id)
             return max(slot.capacity - slot.booked_count, 0)
         return max(event.capacity_total - event.booked_count, 0)
@@ -800,9 +819,15 @@ class YdbStorage:
             _organizer_event_params(item),
         )
 
-    def list_organizer_events(self, actor_user_id: int) -> list[Event]:
+    def list_organizer_events(
+        self,
+        actor_user_id: int,
+        *,
+        with_slots: bool = True,
+        with_images: bool = True,
+    ) -> list[Event]:
         if self._is_admin(actor_user_id):
-            return self.list_events()
+            return self.list_events(with_slots=with_slots, with_images=with_images)
         rows = self._query(
             """
             DECLARE $user_id AS Int64;
@@ -810,7 +835,14 @@ class YdbStorage:
             """,
             {"$user_id": _int(actor_user_id)},
         )
-        events = [self.get_event(int(row["event_id"])) for row in rows]
+        events = [
+            self.get_event(
+                int(row["event_id"]),
+                with_slots=with_slots,
+                with_image=with_images,
+            )
+            for row in rows
+        ]
         return sorted([event for event in events if event is not None], key=lambda item: item.starts_at)
 
     def set_organizer_state(self, state: OrganizerState) -> OrganizerState:

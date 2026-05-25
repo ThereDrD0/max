@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from app.enums import NotificationKind
+from app.domain import SlotNotFoundError
 from app.services.registration_codes import (
     default_code_generator,
     extract_max_user_id,
@@ -61,12 +62,33 @@ class RegistrationService:
         current = self.now()
         return [
             event
-            for event in self.storage.list_events(starts_at_from=current)
+            for event in self.storage.list_events(
+                starts_at_from=current,
+                with_slots=True,
+                with_images=False,
+            )
             if event.starts_at > current
         ]
 
     def available_places(self, event_id: int, slot_id: int | None) -> int:
         return self.storage.available_places(event_id, slot_id)
+
+    def available_places_for_event(
+        self,
+        event: Event,
+        slot_id: int | None = None,
+    ) -> int:
+        if event.slots:
+            if slot_id is None:
+                return sum(
+                    max(slot.capacity - slot.booked_count, 0)
+                    for slot in event.slots
+                )
+            for slot in event.slots:
+                if slot.id == slot_id:
+                    return max(slot.capacity - slot.booked_count, 0)
+            raise SlotNotFoundError("Слот не найден")
+        return max(event.capacity_total - event.booked_count, 0)
 
     def create_registration(
         self,

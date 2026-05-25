@@ -12,6 +12,7 @@ from app.domain import (
     DuplicateActiveRegistrationError,
     LateCancellationDeniedError,
     NoSeatsAvailableError,
+    SlotNotFoundError,
 )
 from app.enums import LateCancelPolicy, NotificationKind, OutboxStatus, RegistrationStatus
 import app.services.registration as registration_module
@@ -140,6 +141,32 @@ def test_repeated_cancellation_does_not_increase_available_places(storage, fixed
 
     assert service.available_places(event.id, None) == 1
     assert storage.get_event(event.id).booked_count == 0
+
+
+def test_available_places_for_event_uses_event_counter_without_storage(storage, fixed_now):
+    event = create_event(storage, fixed_now, capacity=3)
+    event.booked_count = 1
+    service = RegistrationService(storage, now=lambda: fixed_now)
+
+    assert service.available_places_for_event(event) == 2
+
+
+def test_available_places_for_event_sums_loaded_slots(storage, fixed_now):
+    event = create_event(storage, fixed_now, capacity=10, with_slots=True)
+    event.slots[0].booked_count = 1
+    service = RegistrationService(storage, now=lambda: fixed_now)
+
+    assert service.available_places_for_event(event) == 1
+    assert service.available_places_for_event(event, event.slots[0].id) == 0
+    assert service.available_places_for_event(event, event.slots[1].id) == 1
+
+
+def test_available_places_for_event_rejects_unknown_slot(storage, fixed_now):
+    event = create_event(storage, fixed_now, capacity=10, with_slots=True)
+    service = RegistrationService(storage, now=lambda: fixed_now)
+
+    with pytest.raises(SlotNotFoundError):
+        service.available_places_for_event(event, slot_id=999)
 
 
 def test_late_cancellation_policy_is_enforced(storage, fixed_now):

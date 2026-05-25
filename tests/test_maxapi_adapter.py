@@ -20,6 +20,12 @@ def test_maxapi_adapter_loads_pip_installed_library():
     assert Path("maxapi/maxapi").resolve() not in Path(maxapi.__file__).resolve().parents
 
 
+def test_maxapi_adapter_disables_input_media_delay_by_default():
+    client = MaxApiBotClient("test-token")
+
+    assert client.bot.after_input_media_delay == 0.0
+
+
 def test_maxapi_adapter_wraps_dict_attachments_for_pip_library():
     attachments = [{"type": "inline_keyboard", "payload": {"buttons": []}}]
 

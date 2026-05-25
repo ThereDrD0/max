@@ -418,7 +418,11 @@ class BotHandlers:
             await self._handle_builder_callback(user_id, chat_id, data)
         elif data.action == "org_image" and data.event_id is not None:
             self.storage.set_pending_event_image(user_id, data.event_id, now=self.now())
-            event = self.storage.get_event(data.event_id)
+            event = self.storage.get_event(
+                data.event_id,
+                with_slots=False,
+                with_image=False,
+            )
             event_title = event.title if event else "мероприятия"
             await self._send(
                 user_id=user_id,
@@ -645,7 +649,7 @@ class BotHandlers:
             for event in self.registration_service.list_events()
             if (
                 not event.registration_closed
-                and self.registration_service.available_places(event.id, None) > 0
+                and self.registration_service.available_places_for_event(event) > 0
             )
         ]
         if not events:
@@ -752,7 +756,7 @@ class BotHandlers:
         if not self._event_visible_to_users(event):
             await self._send_event_unavailable_for_user(user_id, chat_id)
             return
-        free = self.registration_service.available_places(event.id, None)
+        free = self.registration_service.available_places_for_event(event)
         dev_line = f"\n[DEV] event_id={event.id}" if self.dev_mode else ""
         active_registration = self._active_registration_for_event(user_id, event.id)
         rows: list[list[dict]] = []
@@ -834,17 +838,17 @@ class BotHandlers:
         chat_id: int | None,
         event_id: int,
     ) -> None:
-        event = self.storage.get_event(event_id)
+        event = self.storage.get_event(event_id, with_slots=True, with_image=False)
         if event is None:
             raise RegistrationClosedError("Мероприятие недоступно")
         if event.registration_closed or not self._event_visible_to_users(event):
             raise RegistrationClosedError("Регистрация на мероприятие закрыта")
-        if self.registration_service.available_places(event.id, None) <= 0:
+        if self.registration_service.available_places_for_event(event) <= 0:
             raise NoSeatsAvailableError("Свободных мест нет")
         if event.slots:
             rows = []
             for slot in event.slots:
-                free = self.registration_service.available_places(event.id, slot.id)
+                free = self.registration_service.available_places_for_event(event, slot.id)
                 if free > 0:
                     rows.append(
                         [
@@ -871,7 +875,7 @@ class BotHandlers:
         event_id: int,
         slot_id: int | None,
     ) -> None:
-        event = self.storage.get_event(event_id)
+        event = self.storage.get_event(event_id, with_slots=True, with_image=False)
         if event is None:
             raise RegistrationClosedError("Мероприятие недоступно")
         if event.registration_closed or not self._event_visible_to_users(event):
@@ -1268,7 +1272,7 @@ class BotHandlers:
             ]
         )
         rows.append([callback_button("⬅️ Назад", Payload("org_menu", value=str(page)))])
-        free = self.registration_service.available_places(event.id, None)
+        free = self.registration_service.available_places_for_event(event)
         share_text = "\n\n🔗 Ссылка: Нажмите чтобы скопировать" if deeplink else ""
         status_text = ""
         if not self._event_visible_to_users(event):
@@ -1299,7 +1303,12 @@ class BotHandlers:
         *,
         page: int = 0,
     ) -> None:
-        event = self._organizer_event_for_actor(user_id, event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         registrations = self._sorted_participant_registrations(
             self.organizer_service.get_event_registrations(user_id, event_id)
         )
@@ -1424,7 +1433,12 @@ class BotHandlers:
         *,
         page: int = 0,
     ) -> None:
-        self._organizer_event_for_actor(user_id, event_id)
+        self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         state = OrganizerState(
             user_id=user_id,
             mode=STATE_ATTENDANCE_LOOKUP,
@@ -1516,7 +1530,12 @@ class BotHandlers:
         prefix: str | None = None,
     ) -> None:
         assert state.event_id is not None
-        event = self._organizer_event_for_actor(user_id, state.event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            state.event_id,
+            with_slots=False,
+            with_image=False,
+        )
         text = (
             "🔎 Отметка по коду\n\n"
             f"Мероприятие: {event.title}\n"
@@ -1549,7 +1568,12 @@ class BotHandlers:
         chat_id: int | None,
         event_id: int,
     ) -> None:
-        event = self._organizer_event_for_actor(user_id, event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         if event.registration_closed:
             await self._send(
                 user_id=user_id,
@@ -1596,7 +1620,12 @@ class BotHandlers:
         chat_id: int | None,
         event_id: int,
     ) -> None:
-        event = self._organizer_event_for_actor(user_id, event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         await self._send(
             user_id=user_id,
             chat_id=chat_id,
@@ -1625,7 +1654,12 @@ class BotHandlers:
         chat_id: int | None,
         event_id: int,
     ) -> None:
-        event = self._organizer_event_for_actor(user_id, event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=True,
+            with_image=False,
+        )
         if not event.slots:
             await self._start_manual_reminder_text(
                 user_id,
@@ -1669,7 +1703,12 @@ class BotHandlers:
         *,
         slot_id: int | None,
     ) -> None:
-        event = self._organizer_event_for_actor(user_id, event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=True,
+            with_image=False,
+        )
         if slot_id is not None and not any(slot.id == slot_id for slot in event.slots):
             raise SlotNotFoundError("Слот не найден")
         self.storage.set_organizer_state(
@@ -1785,7 +1824,12 @@ class BotHandlers:
         chat_id: int | None,
         event_id: int,
     ) -> None:
-        event = self._organizer_event_for_actor(user_id, event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         await self._send(
             user_id=user_id,
             chat_id=chat_id,
@@ -1807,7 +1851,12 @@ class BotHandlers:
         event_id: int,
         prompt: str,
     ) -> None:
-        self._organizer_event_for_actor(user_id, event_id)
+        self._organizer_event_for_actor(
+            user_id,
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         self.storage.set_organizer_state(
             OrganizerState(
                 user_id=user_id,
@@ -1830,7 +1879,12 @@ class BotHandlers:
     ) -> None:
         if mode == BUILDER_MODE_EDIT:
             assert event_id is not None
-            self._organizer_event_for_actor(user_id, event_id)
+            self._organizer_event_for_actor(
+                user_id,
+                event_id,
+                with_slots=False,
+                with_image=False,
+            )
         elif not self.organizer_service.can_use_menu(user_id):
             raise AccessDeniedError("Нет доступа к созданию мероприятий")
         state = OrganizerState(
@@ -1897,7 +1951,12 @@ class BotHandlers:
         text: str,
     ) -> None:
         assert state.event_id is not None
-        event = self._organizer_event_for_actor(user_id, state.event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            state.event_id,
+            with_slots=False,
+            with_image=False,
+        )
         local_start = event.starts_at.astimezone(MOSCOW_TZ)
         try:
             if state.mode == STATE_EDIT_DATE:
@@ -2164,7 +2223,12 @@ class BotHandlers:
         if state.mode != BUILDER_MODE_EDIT or state.event_id is None:
             await self._send_builder_prompt(user_id, chat_id, state)
             return
-        event = self._organizer_event_for_actor(user_id, state.event_id)
+        event = self._organizer_event_for_actor(
+            user_id,
+            state.event_id,
+            with_slots=state.step == "slots_intro",
+            with_image=state.step == "image",
+        )
         local_start = event.starts_at.astimezone(MOSCOW_TZ)
         current_values = {
             "title": ("title", event.title, "description"),
@@ -2372,7 +2436,15 @@ class BotHandlers:
     def _event_from_builder_state(self, state: OrganizerState) -> Event:
         day = date.fromisoformat(str(state.data["date"]))
         clock = time.fromisoformat(str(state.data["time"]))
-        current = self.storage.get_event(state.event_id) if state.event_id is not None else None
+        current = (
+            self.storage.get_event(
+                state.event_id,
+                with_slots=False,
+                with_image=False,
+            )
+            if state.event_id is not None
+            else None
+        )
         cancellation_policy_text = current.cancellation_policy_text if current is not None else ""
         late_cancel_policy = current.late_cancel_policy if current is not None else LateCancelPolicy.DENY
         return Event(
@@ -2496,9 +2568,20 @@ class BotHandlers:
             return None
         return value if value > 0 else None
 
-    def _organizer_event_for_actor(self, user_id: int, event_id: int) -> Event:
+    def _organizer_event_for_actor(
+        self,
+        user_id: int,
+        event_id: int,
+        *,
+        with_slots: bool = True,
+        with_image: bool = True,
+    ) -> Event:
         self.organizer_service.get_event_registrations(user_id, event_id)
-        event = self.storage.get_event(event_id)
+        event = self.storage.get_event(
+            event_id,
+            with_slots=with_slots,
+            with_image=with_image,
+        )
         if event is None:
             raise RegistrationClosedError("Мероприятие недоступно")
         return event

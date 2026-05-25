@@ -56,7 +56,13 @@ class Storage(Protocol):
 
     def add_event(self, event: Event, *, slots: list[EventSlot] | None = None) -> Event: ...
 
-    def get_event(self, event_id: int) -> Event | None: ...
+    def get_event(
+        self,
+        event_id: int,
+        *,
+        with_slots: bool = True,
+        with_image: bool = True,
+    ) -> Event | None: ...
 
     def assign_event_slug(
         self,
@@ -134,7 +140,13 @@ class Storage(Protocol):
 
     def clear_pending_event_image(self, user_id: int) -> None: ...
 
-    def list_events(self, *, starts_at_from: datetime | None = None) -> list[Event]: ...
+    def list_events(
+        self,
+        *,
+        starts_at_from: datetime | None = None,
+        with_slots: bool = True,
+        with_images: bool = True,
+    ) -> list[Event]: ...
 
     def delete_expired_events(self, *, expired_before: datetime) -> int: ...
 
@@ -178,7 +190,13 @@ class Storage(Protocol):
 
     def ensure_organizer_event(self, user_id: int, event_id: int) -> None: ...
 
-    def list_organizer_events(self, actor_user_id: int) -> list[Event]: ...
+    def list_organizer_events(
+        self,
+        actor_user_id: int,
+        *,
+        with_slots: bool = True,
+        with_images: bool = True,
+    ) -> list[Event]: ...
 
     def set_organizer_state(self, state: OrganizerState) -> OrganizerState: ...
 

@@ -40,7 +40,11 @@ class OrganizerService:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def list_events(self, actor_user_id: int) -> list[Event]:
-        return self.storage.list_organizer_events(actor_user_id)
+        return self.storage.list_organizer_events(
+            actor_user_id,
+            with_slots=False,
+            with_images=False,
+        )
 
     def can_use_menu(self, actor_user_id: int) -> bool:
         return self.storage.has_role(actor_user_id, "organizer") or self.storage.has_role(actor_user_id, "admin")
@@ -112,7 +116,11 @@ class OrganizerService:
         starts_at: datetime,
     ) -> Event:
         self._ensure_future_start(starts_at)
-        previous = self.storage.get_event(event_id)
+        previous = self.storage.get_event(
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         previous_start = previous.starts_at if previous is not None else None
         event = self.storage.reschedule_event(
             actor_user_id,
@@ -138,7 +146,11 @@ class OrganizerService:
         event_id: int,
         location_or_url: str,
     ) -> Event:
-        previous = self.storage.get_event(event_id)
+        previous = self.storage.get_event(
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         previous_location = previous.location_or_url if previous is not None else None
         event = self.storage.update_event_location(
             actor_user_id,
@@ -183,7 +195,11 @@ class OrganizerService:
         image_url: str | None,
     ) -> Event:
         self._ensure_future_start(event.starts_at)
-        previous = self.storage.get_event(event.id)
+        previous = self.storage.get_event(
+            event.id,
+            with_slots=False,
+            with_image=False,
+        )
         previous_start = previous.starts_at if previous is not None else None
         previous_location = previous.location_or_url if previous is not None else None
         updated = self.storage.replace_organizer_event(
@@ -249,7 +265,12 @@ class OrganizerService:
                     user_id=registration.user_id,
                     kind=NotificationKind.ATTENDANCE_MARKED,
                     message_text=self._render_attendance_marked_notification(
-                        registration.event or self.storage.get_event(registration.event_id)
+                        registration.event
+                        or self.storage.get_event(
+                            registration.event_id,
+                            with_slots=False,
+                            with_image=False,
+                        )
                     ),
                     send_after=current,
                     created_at=current,
@@ -317,7 +338,11 @@ class OrganizerService:
     ) -> list[NotificationOutbox]:
         if kind not in MANUAL_NOTIFICATION_KINDS:
             raise InvalidNotificationKindError("Этот тип уведомления нельзя отправить вручную")
-        event = self.storage.get_event(event_id)
+        event = self.storage.get_event(
+            event_id,
+            with_slots=False,
+            with_image=False,
+        )
         message_text = self._render_manual_notification(kind, event)
         return self.storage.enqueue_manual_notification(
             actor_user_id=actor_user_id,
@@ -336,7 +361,7 @@ class OrganizerService:
         custom_text: str | None,
         starts_in_text: str | None = None,
     ) -> list[NotificationOutbox]:
-        event = self.storage.get_event(event_id)
+        event = self.storage.get_event(event_id, with_slots=True, with_image=False)
         if event is not None and slot_id is not None and not any(
             slot.id == slot_id for slot in event.slots
         ):

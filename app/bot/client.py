@@ -38,9 +38,10 @@ class BotClient(Protocol):
 
 
 class MaxApiBotClient:
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, after_input_media_delay: float = 0.0) -> None:
         Bot = _load_maxapi_bot()
         self.bot = Bot(token=token)
+        self.bot.after_input_media_delay = after_input_media_delay
         self._bot_username: str | None = None
         self._bot_username_loaded = False
 

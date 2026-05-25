@@ -370,6 +370,23 @@ async def test_catalog_hides_full_events_and_omits_place_status(
     ) == 1
 
 
+async def test_catalog_uses_loaded_event_counts_without_available_places(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    create_event(storage, fixed_now, title="Доступное мероприятие")
+    guarded_storage = _AvailablePlacesForbiddenStorage(storage)
+    handlers = BotHandlers(guarded_storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+
+    await handlers.handle_message(101, "Анна", 9001, "/events")
+
+    assert "Доступное мероприятие" in fake_bot.sent[-1]["text"]
+    assert guarded_storage.available_places_calls == 0
+
+
 async def test_catalog_opens_event_detail_before_booking(
     storage, fake_bot, fixed_now
 ):
@@ -1095,3 +1112,16 @@ def _has_uploaded_image(message: dict) -> bool:
         and bool((attachment.get("payload") or {}).get("token"))
         for attachment in message["attachments"]
     )
+
+
+class _AvailablePlacesForbiddenStorage:
+    def __init__(self, inner):
+        self.inner = inner
+        self.available_places_calls = 0
+
+    def available_places(self, *args, **kwargs):
+        self.available_places_calls += 1
+        raise AssertionError("Каталог должен считать места по уже загруженному Event")
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
