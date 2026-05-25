@@ -13,6 +13,13 @@ from app.bot.client import BotClient, MaxApiBotClient
 from app.bot.dispatcher import dispatch_update
 from app.bootstrap import sync_roles_from_settings
 from app.config import Settings, get_settings
+from app.observability.performance import (
+    MeasuredBotClient,
+    MeasuredStorage,
+    emit_perf_metric,
+    measure,
+    performance_trace,
+)
 from app.services.event_cleanup import EventCleanupService
 from app.storage.base import Storage
 from app.storage.factory import create_storage
@@ -52,16 +59,45 @@ def create_app(
 
     @app.post(resolved_settings.webhook_path)
     async def webhook(request: Request) -> JSONResponse:
-        _validate_secret(request.headers.get("X-Max-Bot-Api-Secret"), resolved_settings.webhook_secret)
-        update = await request.json()
-        await dispatch_update(
-            storage=resolved_storage,
-            bot_client=resolved_bot_client,
-            settings=resolved_settings,
-            update=update,
-            now=now,
-        )
-        return JSONResponse({"ok": True})
+        with performance_trace(
+            source="fastapi",
+            trigger="webhook",
+            enabled=resolved_settings.performance_metrics_enabled,
+            slow_ms=resolved_settings.performance_metrics_slow_ms,
+        ) as trace:
+            status_code: int | None = None
+            error_type: str | None = None
+            try:
+                _validate_secret(
+                    request.headers.get("X-Max-Bot-Api-Secret"),
+                    resolved_settings.webhook_secret,
+                )
+                with measure("decode"):
+                    update = await request.json()
+                with measure("dispatch"):
+                    await dispatch_update(
+                        storage=MeasuredStorage(resolved_storage),
+                        bot_client=MeasuredBotClient(resolved_bot_client),
+                        settings=resolved_settings,
+                        update=update,
+                        now=now,
+                    )
+                status_code = status.HTTP_200_OK
+                return JSONResponse({"ok": True})
+            except HTTPException as exc:
+                status_code = exc.status_code
+                error_type = type(exc).__name__
+                raise
+            except Exception as exc:
+                error_type = type(exc).__name__
+                raise
+            finally:
+                emit_perf_metric(
+                    trace,
+                    ok=status_code is not None and status_code < 400,
+                    status_code=status_code,
+                    error_type=error_type,
+                )
 
     return app
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 from datetime import datetime, timezone
 
 import ydb
 
+from app.observability.performance import record_method
 from app.domain import (
     AccessDeniedError,
     BotDomainError,
@@ -1611,27 +1613,39 @@ class YdbStorage:
         raise RuntimeError("Не удалось сгенерировать идентификатор")
 
     def _query(self, query: str, params: dict | None = None):
-        result_sets = self.pool.execute_with_retries(
-            query,
-            params,
-            retry_settings=ydb.RetrySettings(idempotent=True),
-        )
-        return _rows(result_sets)
+        started_at = time.perf_counter()
+        try:
+            result_sets = self.pool.execute_with_retries(
+                query,
+                params,
+                retry_settings=ydb.RetrySettings(idempotent=True),
+            )
+            return _rows(result_sets)
+        finally:
+            record_method("ydb", "query", (time.perf_counter() - started_at) * 1000)
 
     def _one(self, query: str, params: dict | None = None):
         rows = self._query(query, params)
         return rows[0] if rows else None
 
     def _execute(self, query: str, params: dict | None = None) -> None:
-        self.pool.execute_with_retries(
-            query,
-            params,
-            retry_settings=ydb.RetrySettings(max_retries=10, idempotent=True),
-        )
+        started_at = time.perf_counter()
+        try:
+            self.pool.execute_with_retries(
+                query,
+                params,
+                retry_settings=ydb.RetrySettings(max_retries=10, idempotent=True),
+            )
+        finally:
+            record_method("ydb", "execute", (time.perf_counter() - started_at) * 1000)
 
     def _tx_execute(self, tx, query: str, params: dict | None = None, *, commit: bool = False):
-        with tx.execute(query, params, commit_tx=commit) as result_sets:
-            return _rows(result_sets)
+        started_at = time.perf_counter()
+        try:
+            with tx.execute(query, params, commit_tx=commit) as result_sets:
+                return _rows(result_sets)
+        finally:
+            record_method("ydb", "tx_execute", (time.perf_counter() - started_at) * 1000)
 
     def _tx_one(self, tx, query: str, params: dict | None = None):
         rows = self._tx_execute(tx, query, params)

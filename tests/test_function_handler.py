@@ -5,6 +5,7 @@ import json
 
 from app.config import Settings
 from app.function_handler import create_function_handler
+from app.bot.payloads import Payload
 from app.services.registration import RegistrationService
 from app.storage.entities import NotificationOutbox
 from app.enums import NotificationKind, OutboxStatus
@@ -37,6 +38,128 @@ def test_function_handler_processes_http_webhook(storage, fake_bot):
 
     assert response["statusCode"] == 200
     assert "командой хакатона" in fake_bot.sent[-1]["text"]
+
+
+def test_function_handler_emits_webhook_perf_metric(storage, fake_bot, capsys):
+    handler = create_function_handler(
+        Settings(webhook_secret="secret", max_bot_token="test-token"),
+        storage=storage,
+        bot_client=fake_bot,
+    )
+
+    response = handler(
+        {
+            "httpMethod": "POST",
+            "headers": {"X-Max-Bot-Api-Secret": "secret"},
+            "body": json.dumps(
+                {
+                    "update_type": "bot_started",
+                    "chat_id": 9001,
+                    "user": {"user_id": 101, "name": "Анна"},
+                },
+                ensure_ascii=False,
+            ),
+            "isBase64Encoded": False,
+        },
+        None,
+    )
+
+    metrics = _perf_metrics(capsys.readouterr().out)
+    assert response["statusCode"] == 200
+    assert len(metrics) == 1
+    metric = metrics[0]
+    assert metric["event"] == "perf_metric"
+    assert metric["source"] == "cloud_function"
+    assert metric["trigger"] == "webhook"
+    assert metric["update_type"] == "bot_started"
+    assert metric["action"] == "bot_started"
+    assert metric["ok"] is True
+    assert metric["status_code"] == 200
+    assert metric["duration_ms"] >= 0
+    assert metric["decode_ms"] >= 0
+    assert metric["dispatch_ms"] >= 0
+    assert metric["storage_calls"] >= 1
+    assert metric["max_calls"] >= 1
+    assert "user_id" not in metric
+    assert "chat_id" not in metric
+    assert "text" not in metric
+
+
+def test_function_handler_perf_metric_uses_callback_action(
+    storage,
+    fake_bot,
+    fixed_now,
+    capsys,
+):
+    create_event(storage, fixed_now, title="Пробное занятие по Python")
+    storage.upsert_user(101, "Анна", now=fixed_now)
+    storage.record_profile_consent(101, "docs", now=fixed_now)
+    handler = create_function_handler(
+        Settings(webhook_secret="secret", max_bot_token="test-token"),
+        storage=storage,
+        bot_client=fake_bot,
+        now=lambda: fixed_now,
+    )
+
+    response = handler(
+        {
+            "httpMethod": "POST",
+            "headers": {"X-Max-Bot-Api-Secret": "secret"},
+            "body": json.dumps(
+                {
+                    "update_type": "message_callback",
+                    "callback": {
+                        "user": {"user_id": 101, "name": "Анна"},
+                        "payload": Payload("catalog").pack(),
+                    },
+                    "message": {
+                        "recipient": {"chat_id": 9001},
+                        "body": {"mid": "mid.catalog"},
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            "isBase64Encoded": False,
+        },
+        None,
+    )
+
+    metric = _perf_metrics(capsys.readouterr().out)[0]
+    assert response["statusCode"] == 200
+    assert metric["update_type"] == "message_callback"
+    assert metric["action"] == "catalog"
+
+
+def test_function_handler_can_disable_perf_metrics(storage, fake_bot, capsys):
+    handler = create_function_handler(
+        Settings(
+            webhook_secret="secret",
+            max_bot_token="test-token",
+            performance_metrics_enabled=False,
+        ),
+        storage=storage,
+        bot_client=fake_bot,
+    )
+
+    response = handler(
+        {
+            "httpMethod": "POST",
+            "headers": {"X-Max-Bot-Api-Secret": "secret"},
+            "body": json.dumps(
+                {
+                    "update_type": "bot_started",
+                    "chat_id": 9001,
+                    "user": {"user_id": 101, "name": "Анна"},
+                },
+                ensure_ascii=False,
+            ),
+            "isBase64Encoded": False,
+        },
+        None,
+    )
+
+    assert response["statusCode"] == 200
+    assert _perf_metrics(capsys.readouterr().out) == []
 
 
 def test_function_handler_processes_deeplink_payload(storage, fake_bot, fixed_now):
@@ -265,3 +388,15 @@ def _clipboard_payload(message: dict) -> str | None:
                 if button.get("type") == "clipboard":
                     return button.get("payload")
     return None
+
+
+def _perf_metrics(output: str) -> list[dict]:
+    metrics = []
+    for line in output.splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("event") == "perf_metric":
+            metrics.append(item)
+    return metrics

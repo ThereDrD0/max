@@ -38,6 +38,14 @@ class Settings(BaseSettings):
         alias="ORGANIZER_USER_IDS",
     )
     max_api_rps: int = Field(default=30, alias="MAX_API_RPS")
+    performance_metrics_enabled: bool = Field(
+        default=True,
+        alias="PERFORMANCE_METRICS_ENABLED",
+    )
+    performance_metrics_slow_ms: int = Field(
+        default=1000,
+        alias="PERFORMANCE_METRICS_SLOW_MS",
+    )
     documents_version: str = Field(
         default="hackathon-2026-05",
         alias="DOCUMENTS_VERSION",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -45,6 +47,32 @@ def test_webhook_accepts_bot_started_update(storage, fake_bot):
     assert response.status_code == 200
     assert fake_bot.sent[-1]["user_id"] == 101
     assert "командой хакатона" in fake_bot.sent[-1]["text"]
+
+
+def test_webhook_emits_fastapi_perf_metric(storage, fake_bot, capsys):
+    app = create_app(
+        Settings(webhook_secret="right-secret", max_bot_token="test-token"),
+        storage=storage,
+        bot_client=fake_bot,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/webhook",
+        json={
+            "update_type": "bot_started",
+            "chat_id": 9001,
+            "user": {"user_id": 101, "name": "Анна", "is_bot": False},
+        },
+        headers={"X-Max-Bot-Api-Secret": "right-secret"},
+    )
+
+    metrics = _perf_metrics(capsys.readouterr().out)
+    assert response.status_code == 200
+    assert len(metrics) == 1
+    assert metrics[0]["source"] == "fastapi"
+    assert metrics[0]["trigger"] == "webhook"
+    assert metrics[0]["action"] == "bot_started"
 
 
 def test_webhook_deletes_message_created_source_message(storage, fake_bot, fixed_now):
@@ -133,3 +161,15 @@ def _clipboard_payload(message: dict) -> str | None:
                 if button.get("type") == "clipboard":
                     return button.get("payload")
     return None
+
+
+def _perf_metrics(output: str) -> list[dict]:
+    metrics = []
+    for line in output.splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("event") == "perf_metric":
+            metrics.append(item)
+    return metrics

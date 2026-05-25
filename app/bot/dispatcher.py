@@ -5,7 +5,9 @@ from datetime import datetime
 
 from app.bot.client import BotClient
 from app.bot.handlers import BotHandlers
+from app.bot.payloads import Payload
 from app.config import Settings
+from app.observability.performance import set_trace_metadata
 from app.storage.base import Storage
 
 
@@ -26,6 +28,10 @@ async def dispatch_update(
         max_bot_username=settings.max_bot_username,
     )
     update_type = update.get("update_type")
+    set_trace_metadata(
+        update_type=str(update_type) if update_type else None,
+        action=_update_action(update),
+    )
     if update_type == "bot_started":
         user = update.get("user") or {}
         await handlers.handle_bot_started(
@@ -71,3 +77,22 @@ def _display_name(user: dict) -> str:
         )
         or f"Пользователь {user.get('user_id')}"
     )
+
+
+def _update_action(update: dict) -> str:
+    update_type = str(update.get("update_type") or "")
+    if update_type == "bot_started":
+        return "bot_started"
+    if update_type == "message_created":
+        message = update.get("message") or {}
+        body = message.get("body") or {}
+        text = str(body.get("text") or "").strip()
+        command = text.split(maxsplit=1)[0] if text else ""
+        return command if command.startswith("/") else "message_created"
+    if update_type == "message_callback":
+        callback = update.get("callback") or {}
+        try:
+            return Payload.unpack(str(callback.get("payload") or "")).action
+        except (IndexError, TypeError, ValueError):
+            return "callback_unknown"
+    return update_type or "unknown"

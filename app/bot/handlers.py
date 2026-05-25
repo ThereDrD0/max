@@ -56,6 +56,7 @@ from app.services.registration_codes import (
     extract_max_user_id,
     normalize_registration_code_input,
 )
+from app.observability.performance import measure
 from app.storage.base import Storage
 from app.storage.entities import Event, EventSlot, OrganizerState, Registration
 
@@ -2778,7 +2779,10 @@ class BotHandlers:
         attachments: list | None = None,
         format: str | None = None,
     ) -> None:
-        async with _send_lock_for(user_id):
+        lock = _send_lock_for(user_id)
+        with measure("send_lock_wait"):
+            await lock.acquire()
+        try:
             await self._send_unlocked(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -2786,6 +2790,8 @@ class BotHandlers:
                 attachments=attachments,
                 format=format,
             )
+        finally:
+            lock.release()
 
     async def _send_unlocked(
         self,
