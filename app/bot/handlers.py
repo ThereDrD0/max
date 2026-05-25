@@ -608,31 +608,47 @@ class BotHandlers:
         await self._send_main_menu(user_id, chat_id)
 
     async def _send_main_menu(self, user_id: int, chat_id: int | None) -> None:
+        can_use_organizer_menu = self.organizer_service.can_use_menu(user_id)
         rows = [
             [callback_button("📚 Мероприятия", Payload("catalog"))],
             [callback_button("🎫 Мои записи", Payload("my_regs"))],
         ]
-        if self.organizer_service.can_use_menu(user_id):
+        if can_use_organizer_menu:
             rows.append([callback_button("🧑‍💼 Меню организатора", Payload("org_menu"))])
         await self._send(
             user_id=user_id,
             chat_id=chat_id,
-            text=self._main_menu_text(user_id),
+            text=self._main_menu_text(user_id, can_use_organizer_menu=can_use_organizer_menu),
             attachments=[
                 image_attachment(BotImageAsset.MAIN_MENU),
                 *inline_keyboard(rows),
             ],
         )
 
-    def _main_menu_text(self, user_id: int) -> str:
-        return f"{MAIN_MENU_HEADER_TEXT}\n{self._available_commands_text(user_id)}"
+    def _main_menu_text(
+        self,
+        user_id: int,
+        *,
+        can_use_organizer_menu: bool | None = None,
+    ) -> str:
+        return (
+            f"{MAIN_MENU_HEADER_TEXT}\n"
+            f"{self._available_commands_text(user_id, can_use_organizer_menu=can_use_organizer_menu)}"
+        )
 
     def _unknown_command_text(self, user_id: int) -> str:
         return f"Я понимаю команды:\n{self._available_commands_text(user_id)}"
 
-    def _available_commands_text(self, user_id: int) -> str:
+    def _available_commands_text(
+        self,
+        user_id: int,
+        *,
+        can_use_organizer_menu: bool | None = None,
+    ) -> str:
         lines = list(BASE_COMMAND_LINES)
-        if self.organizer_service.can_use_menu(user_id):
+        if can_use_organizer_menu is None:
+            can_use_organizer_menu = self.organizer_service.can_use_menu(user_id)
+        if can_use_organizer_menu:
             lines.extend(ORGANIZER_COMMAND_LINES)
         return "\n".join(lines)
 
@@ -2863,13 +2879,7 @@ class BotHandlers:
         user_id: int,
         event_id: int,
     ) -> Registration | None:
-        for registration in self.registration_service.list_user_registrations(user_id):
-            if (
-                registration.event_id == event_id
-                and registration.status in ACTIVE_REGISTRATION_STATUSES
-            ):
-                return registration
-        return None
+        return self.storage.get_active_registration_for_event(user_id, event_id)
 
     async def _event_deeplink(self, event: Event) -> str | None:
         username = await self._max_bot_username()

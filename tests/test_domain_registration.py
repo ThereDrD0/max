@@ -169,6 +169,35 @@ def test_available_places_for_event_rejects_unknown_slot(storage, fixed_now):
         service.available_places_for_event(event, slot_id=999)
 
 
+def test_get_active_registration_for_event_returns_only_active_record(
+    storage,
+    fixed_now,
+):
+    first_event = create_event(storage, fixed_now, title="Первая встреча")
+    second_event = create_event(storage, fixed_now, title="Вторая встреча")
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=iter(["FIRST1", "SECOND"]).__next__,
+    )
+    service.upsert_user(101, "Анна")
+    service.record_profile_consent(101, "docs")
+
+    assert storage.get_active_registration_for_event(101, first_event.id) is None
+
+    canceled = service.create_registration(101, first_event.id, None)
+    service.cancel_registration(101, canceled.id)
+    active = service.create_registration(101, second_event.id, None)
+
+    assert storage.get_active_registration_for_event(101, first_event.id) is None
+    found = storage.get_active_registration_for_event(101, second_event.id)
+    assert found is not None
+    assert found.id == active.id
+    assert found.event is None
+    assert found.slot is None
+    assert found.user is None
+
+
 def test_late_cancellation_policy_is_enforced(storage, fixed_now):
     denied_event = create_event(
         storage,
@@ -281,6 +310,37 @@ def test_sync_registration_reminders_backfills_only_future_items(
         NotificationKind.REMINDER_START,
     ]
     assert all(item.send_after >= fixed_now for item in outbox)
+
+
+def test_sync_registration_reminders_uses_batched_registration_data(
+    storage,
+    fixed_now,
+    monkeypatch,
+):
+    event = create_event(storage, fixed_now, starts_in=timedelta(days=2), with_slots=True)
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "SYNC02",
+    )
+    service.upsert_user(101, "Анна")
+    service.record_profile_consent(101, "hackathon-2026-05")
+    service.create_registration(101, event.id, event.slots[1].id)
+    storage.notifications.clear()
+
+    def fail_attach(registration):
+        raise AssertionError("sync_registration_reminders не должен собирать записи по одной")
+
+    monkeypatch.setattr(storage, "_attach_registration", fail_attach)
+
+    created = storage.sync_registration_reminders(
+        now=fixed_now,
+        render_reminder=RegistrationService._render_reminder,
+    )
+
+    outbox = storage.list_notifications()
+    assert created == 3
+    assert "🕒 Слот: 11:00" in outbox[0].message_text
 
 
 def test_sync_registration_reminders_skips_legacy_one_hour_items(

@@ -848,6 +848,40 @@ async def test_event_detail_cancel_requires_explicit_confirmation(
     assert storage.get_registration(registration.id).status.value == "canceled_by_user"
 
 
+async def test_event_detail_uses_direct_active_registration_lookup(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(storage, fixed_now, title="День открытых дверей ИТ-института")
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "OPEN01",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+
+    def fail_list_user_registrations(user_id: int):
+        raise AssertionError("Карточка мероприятия не должна читать все записи пользователя")
+
+    storage.list_user_registrations = fail_list_user_registrations
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("event_detail", event_id=event.id).pack(),
+    )
+
+    detail = fake_bot.sent[-1]
+    assert "✅ ВЫ УЖЕ ЗАПИСАНЫ НА ЭТО МЕРОПРИЯТИЕ." in detail["text"]
+    assert f"Код записи: {registration.code}" in detail["text"]
+
+
 async def test_event_detail_refreshes_available_places_after_other_registration(
     storage, fake_bot, fixed_now
 ):

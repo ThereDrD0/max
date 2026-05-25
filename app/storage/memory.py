@@ -341,11 +341,12 @@ class MemoryStorage:
         events = list(self.events.values())
         if starts_at_from is not None:
             events = [event for event in events if event.starts_at >= starts_at_from]
-        for event in events:
-            if with_slots:
-                event.slots = self._event_slots(event.id)
-            if with_images:
-                self._attach_event_image(event)
+        if with_slots:
+            slots_by_event = self._event_slots_for_events([event.id for event in events])
+            for event in events:
+                event.slots = slots_by_event.get(event.id, [])
+        if with_images:
+            self._attach_event_images_for_events(events)
         return sorted(events, key=lambda item: item.starts_at)
 
     def delete_expired_events(self, *, expired_before: datetime) -> int:
@@ -514,15 +515,30 @@ class MemoryStorage:
         return self._attach_registration(registration) if registration else None
 
     def list_user_registrations(self, user_id: int) -> list[Registration]:
+        registrations = [
+            item
+            for item in self.registrations.values()
+            if item.user_id == user_id
+        ]
+        self._attach_registrations_batch(registrations)
         return sorted(
-            [
-                self._attach_registration(item)
-                for item in self.registrations.values()
-                if item.user_id == user_id
-            ],
+            registrations,
             key=lambda item: item.created_at,
             reverse=True,
         )
+
+    def get_active_registration_for_event(
+        self,
+        user_id: int,
+        event_id: int,
+    ) -> Registration | None:
+        registration_id = self.active_registration_keys.get(self._active_key(user_id, event_id))
+        if registration_id is None:
+            return None
+        registration = self.registrations.get(registration_id)
+        if registration is None or registration.status not in ACTIVE_REGISTRATION_STATUSES:
+            return None
+        return self._registration_without_related_objects(registration)
 
     def ensure_role(self, user_id: int, role: str) -> None:
         with self._lock:
@@ -562,15 +578,12 @@ class MemoryStorage:
             for item in self.organizer_events.values()
             if item.user_id == actor_user_id
         }
-        events = [
-            self.get_event(
-                event_id,
-                with_slots=with_slots,
-                with_image=with_images,
-            )
-            for event_id in event_ids
-        ]
-        return sorted([event for event in events if event is not None], key=lambda item: item.starts_at)
+        events_by_id = self._events_by_ids(
+            event_ids,
+            with_slots=with_slots,
+            with_images=with_images,
+        )
+        return sorted(events_by_id.values(), key=lambda item: item.starts_at)
 
     def set_organizer_state(self, state: OrganizerState) -> OrganizerState:
         with self._lock:
@@ -774,18 +787,25 @@ class MemoryStorage:
                     item.status = OutboxStatus.SKIPPED
                     item.last_error = "Заменено новой схемой напоминаний"
                     changed += 1
-            for registration in list(self.registrations.values()):
-                if registration.status not in ACTIVE_REGISTRATION_STATUSES:
-                    continue
-                if not registration.notifications_enabled:
-                    continue
-                event = self.events.get(registration.event_id)
+            registrations = [
+                registration
+                for registration in self.registrations.values()
+                if (
+                    registration.status in ACTIVE_REGISTRATION_STATUSES
+                    and registration.notifications_enabled
+                )
+            ]
+            self._attach_registrations_batch(
+                registrations,
+                with_user=False,
+                with_images=False,
+            )
+            for registration in registrations:
+                event = registration.event
                 if event is None:
                     continue
-                event.slots = self._event_slots(event.id)
-                attached = self._attach_registration(registration)
                 changed += self._sync_registration_reminder_items(
-                    attached,
+                    registration,
                     event,
                     now=now,
                     render_reminder=render_reminder,
@@ -807,10 +827,18 @@ class MemoryStorage:
             if item.status == OutboxStatus.PENDING and item.send_after <= now
         ]
         due.sort(key=lambda item: (item.send_after, item.id))
-        for item in due[:limit]:
+        result = due[:limit]
+        registrations = [
+            self.registrations[item.registration_id]
+            for item in result
+            if item.registration_id is not None and item.registration_id in self.registrations
+        ]
+        self._attach_registrations_batch(registrations, with_user=False, with_images=False)
+        registrations_by_id = {registration.id: registration for registration in registrations}
+        for item in result:
             if item.registration_id is not None:
-                item.registration = self.get_registration(item.registration_id)
-        return due[:limit]
+                item.registration = registrations_by_id.get(item.registration_id)
+        return result
 
     def set_notification_result(
         self,
@@ -1074,6 +1102,82 @@ class MemoryStorage:
         self.active_registration_keys.pop(
             self._active_key(registration.user_id, registration.event_id),
             None,
+        )
+
+    def _events_by_ids(
+        self,
+        event_ids: set[int] | list[int],
+        *,
+        with_slots: bool = True,
+        with_images: bool = True,
+    ) -> dict[int, Event]:
+        ids = {int(event_id) for event_id in event_ids}
+        events = {
+            event.id: event
+            for event in self.events.values()
+            if event.id in ids
+        }
+        if with_slots:
+            slots_by_event = self._event_slots_for_events(events.keys())
+            for event in events.values():
+                event.slots = slots_by_event.get(event.id, [])
+        if with_images:
+            self._attach_event_images_for_events(list(events.values()))
+        return events
+
+    def _event_slots_for_events(
+        self,
+        event_ids: set[int] | list[int],
+    ) -> dict[int, list[EventSlot]]:
+        ids = {int(event_id) for event_id in event_ids}
+        slots_by_event: dict[int, list[EventSlot]] = {event_id: [] for event_id in ids}
+        for slot in sorted(self.slots.values(), key=lambda item: item.starts_at):
+            if slot.event_id in ids:
+                slots_by_event.setdefault(slot.event_id, []).append(slot)
+        return slots_by_event
+
+    def _attach_event_images_for_events(self, events: list[Event]) -> None:
+        for event in events:
+            self._attach_event_image(event)
+
+    def _attach_registrations_batch(
+        self,
+        registrations: list[Registration],
+        *,
+        with_event: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
+    ) -> None:
+        if not registrations:
+            return
+        events_by_id: dict[int, Event] = {}
+        if with_event:
+            events_by_id = self._events_by_ids(
+                {registration.event_id for registration in registrations},
+                with_slots=True,
+                with_images=with_images,
+            )
+        slots_by_id = self.slots if with_slot else {}
+        for registration in registrations:
+            registration.event = events_by_id.get(registration.event_id) if with_event else None
+            registration.slot = slots_by_id.get(registration.slot_id) if registration.slot_id else None
+            registration.user = self.users.get(registration.user_id) if with_user else None
+
+    @staticmethod
+    def _registration_without_related_objects(registration: Registration) -> Registration:
+        return Registration(
+            id=registration.id,
+            code=registration.code,
+            user_id=registration.user_id,
+            event_id=registration.event_id,
+            slot_id=registration.slot_id,
+            status=registration.status,
+            notifications_enabled=registration.notifications_enabled,
+            created_at=registration.created_at,
+            updated_at=registration.updated_at,
+            canceled_at=registration.canceled_at,
+            attended_at=registration.attended_at,
         )
 
     def _attach_registration(self, registration: Registration) -> Registration:

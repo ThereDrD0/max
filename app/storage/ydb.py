@@ -206,7 +206,7 @@ class YdbStorage:
         row = self._one(
             """
             DECLARE $user_id AS Int64;
-            SELECT id FROM consents
+            SELECT id FROM consents VIEW idx_consents_user
             WHERE user_id = $user_id AND profile_data_allowed = true
             LIMIT 1;
             """,
@@ -247,7 +247,7 @@ class YdbStorage:
             return None
         event = _event(row)
         if with_slots:
-            event.slots = self._event_slots(event.id)
+            event.slots = self._event_slots_for_events([event.id]).get(event.id, [])
         if with_image:
             self._attach_event_image(event)
         return event
@@ -306,7 +306,7 @@ class YdbStorage:
         row = self._one(
             """
             DECLARE $event_id AS Int64;
-            SELECT slug FROM event_deeplinks
+            SELECT slug FROM event_deeplinks VIEW idx_event_deeplinks_event
             WHERE event_id = $event_id
             LIMIT 1;
             """,
@@ -519,30 +519,31 @@ class YdbStorage:
         with_images: bool = True,
     ) -> list[Event]:
         if starts_at_from is None:
-            rows = self._query("SELECT * FROM events ORDER BY starts_at;")
+            rows = self._query("SELECT * FROM events VIEW idx_events_starts_at ORDER BY starts_at;")
         else:
             rows = self._query(
                 """
                 DECLARE $starts_at_from AS Timestamp;
-                SELECT * FROM events
+                SELECT * FROM events VIEW idx_events_starts_at
                 WHERE starts_at >= $starts_at_from
                 ORDER BY starts_at;
                 """,
                 {"$starts_at_from": _timestamp(starts_at_from)},
             )
         events = [_event(row) for row in rows]
-        for event in events:
-            if with_slots:
-                event.slots = self._event_slots(event.id)
-            if with_images:
-                self._attach_event_image(event)
+        if with_slots:
+            slots_by_event = self._event_slots_for_events([event.id for event in events])
+            for event in events:
+                event.slots = slots_by_event.get(event.id, [])
+        if with_images:
+            self._attach_event_images_for_events(events)
         return events
 
     def delete_expired_events(self, *, expired_before: datetime) -> int:
         rows = self._query(
             """
             DECLARE $expired_before AS Timestamp;
-            SELECT id FROM events
+            SELECT id FROM events VIEW idx_events_starts_at
             WHERE starts_at <= $expired_before;
             """,
             {"$expired_before": _timestamp(expired_before)},
@@ -750,20 +751,49 @@ class YdbStorage:
         rows = self._query(
             """
             DECLARE $user_id AS Int64;
-            SELECT * FROM registrations
+            SELECT * FROM registrations VIEW idx_registrations_user
             WHERE user_id = $user_id
             ORDER BY created_at DESC;
             """,
             {"$user_id": _int(user_id)},
         )
-        return [self._attach_registration(_registration(row)) for row in rows]
+        registrations = [_registration(row) for row in rows]
+        self._attach_registrations_batch(registrations)
+        return registrations
+
+    def get_active_registration_for_event(
+        self,
+        user_id: int,
+        event_id: int,
+    ) -> Registration | None:
+        row = self._one(
+            """
+            DECLARE $active_key AS Utf8;
+            SELECT registration_id FROM active_registration_keys
+            WHERE active_key = $active_key;
+            """,
+            {"$active_key": _utf8(self._active_key(user_id, event_id))},
+        )
+        if row is None:
+            return None
+        registration_row = self._one(
+            """
+            DECLARE $id AS Int64;
+            SELECT * FROM registrations WHERE id = $id;
+            """,
+            {"$id": _int(int(row.get("registration_id") or 0))},
+        )
+        registration = _registration(registration_row) if registration_row else None
+        if registration is None or registration.status not in ACTIVE_REGISTRATION_STATUSES:
+            return None
+        return registration
 
     def ensure_role(self, user_id: int, role: str) -> None:
         row = self._one(
             """
             DECLARE $user_id AS Int64;
             DECLARE $role AS Utf8;
-            SELECT id FROM role_assignments
+            SELECT id FROM role_assignments VIEW idx_roles_user
             WHERE user_id = $user_id AND role = $role
             LIMIT 1;
             """,
@@ -788,7 +818,7 @@ class YdbStorage:
             """
             DECLARE $user_id AS Int64;
             DECLARE $role AS Utf8;
-            SELECT id FROM role_assignments
+            SELECT id FROM role_assignments VIEW idx_roles_user
             WHERE user_id = $user_id AND role = $role
             LIMIT 1;
             """,
@@ -801,7 +831,7 @@ class YdbStorage:
             """
             DECLARE $user_id AS Int64;
             DECLARE $event_id AS Int64;
-            SELECT id FROM organizer_events
+            SELECT id FROM organizer_events VIEW idx_organizer_events_user
             WHERE user_id = $user_id AND event_id = $event_id
             LIMIT 1;
             """,
@@ -833,19 +863,17 @@ class YdbStorage:
         rows = self._query(
             """
             DECLARE $user_id AS Int64;
-            SELECT event_id FROM organizer_events WHERE user_id = $user_id;
+            SELECT event_id FROM organizer_events VIEW idx_organizer_events_user
+            WHERE user_id = $user_id;
             """,
             {"$user_id": _int(actor_user_id)},
         )
-        events = [
-            self.get_event(
-                int(row["event_id"]),
-                with_slots=with_slots,
-                with_image=with_images,
-            )
-            for row in rows
-        ]
-        return sorted([event for event in events if event is not None], key=lambda item: item.starts_at)
+        events = self._events_by_ids(
+            [int(row["event_id"]) for row in rows],
+            with_slots=with_slots,
+            with_images=with_images,
+        )
+        return sorted(events.values(), key=lambda item: item.starts_at)
 
     def set_organizer_state(self, state: OrganizerState) -> OrganizerState:
         self._execute(
@@ -896,13 +924,15 @@ class YdbStorage:
         rows = self._query(
             """
             DECLARE $event_id AS Int64;
-            SELECT * FROM registrations
+            SELECT * FROM registrations VIEW idx_registrations_event
             WHERE event_id = $event_id
             ORDER BY created_at DESC;
             """,
             {"$event_id": _int(event_id)},
         )
-        return [self._attach_registration(_registration(row)) for row in rows]
+        registrations = [_registration(row) for row in rows]
+        self._attach_registrations_batch(registrations)
+        return registrations
 
     def find_registration_by_code(
         self,
@@ -918,7 +948,7 @@ class YdbStorage:
             """
             DECLARE $event_id AS Int64;
             DECLARE $code AS Utf8;
-            SELECT * FROM registrations
+            SELECT * FROM registrations VIEW idx_registrations_event
             WHERE event_id = $event_id AND code = $code
             LIMIT 1;
             """,
@@ -1106,7 +1136,7 @@ class YdbStorage:
         rows = self._query(
             """
             DECLARE $event_id AS Int64;
-            SELECT * FROM registrations
+            SELECT * FROM registrations VIEW idx_registrations_event
             WHERE event_id = $event_id AND notifications_enabled = true;
             """,
             {"$event_id": _int(event_id)},
@@ -1153,22 +1183,31 @@ class YdbStorage:
     ) -> int:
         current = _dt(now)
         changed = self._skip_legacy_reminders()
-        rows = self._query(
+        registration_rows = self._query(
             """
-            SELECT id FROM registrations
+            SELECT * FROM registrations
             WHERE notifications_enabled = true
               AND status IN ("confirmed", "attended");
             """
         )
-        for row in rows:
-            registration = self.get_registration(int(row["id"]))
-            if registration is None or registration.event is None:
+        registrations = [_registration(row) for row in registration_rows]
+        self._attach_registrations_batch(
+            registrations,
+            with_user=False,
+            with_images=False,
+        )
+        notifications = self._notifications_by_registration_ids(
+            [registration.id for registration in registrations]
+        )
+        for registration in registrations:
+            if registration.event is None:
                 continue
             changed += self._sync_registration_reminder_items(
                 registration,
                 registration.event,
                 now=current,
                 render_reminder=render_reminder,
+                existing_items_by_kind=notifications.get(registration.id, {}),
             )
         return changed
 
@@ -1186,14 +1225,16 @@ class YdbStorage:
             """
             DECLARE $now AS Timestamp;
             DECLARE $limit AS Uint64;
-            SELECT * FROM notification_outbox
+            SELECT * FROM notification_outbox VIEW idx_outbox_status_send
             WHERE status = "pending" AND send_after <= $now
             ORDER BY send_after, id
             LIMIT $limit;
             """,
             {"$now": _timestamp(now), "$limit": _uint64(limit)},
         )
-        return [self._attach_notification(_notification(row)) for row in rows]
+        notifications = [_notification(row) for row in rows]
+        self._attach_notifications_batch(notifications)
+        return notifications
 
     def set_notification_result(
         self,
@@ -1379,7 +1420,7 @@ class YdbStorage:
             DECLARE $event_id AS Int64;
             DECLARE $confirmed AS Utf8;
             DECLARE $attended AS Utf8;
-            SELECT * FROM registrations
+            SELECT * FROM registrations VIEW idx_registrations_event
             WHERE event_id = $event_id AND (status = $confirmed OR status = $attended);
             """,
             {
@@ -1440,7 +1481,7 @@ class YdbStorage:
         row = self._one(
             """
             DECLARE $user_id AS Int64;
-            SELECT id FROM role_assignments
+            SELECT id FROM role_assignments VIEW idx_roles_user
             WHERE user_id = $user_id AND role = "admin"
             LIMIT 1;
             """,
@@ -1455,7 +1496,7 @@ class YdbStorage:
             """
             DECLARE $user_id AS Int64;
             DECLARE $event_id AS Int64;
-            SELECT id FROM organizer_events
+            SELECT id FROM organizer_events VIEW idx_organizer_events_user
             WHERE user_id = $user_id AND event_id = $event_id
             LIMIT 1;
             """,
@@ -1467,13 +1508,153 @@ class YdbStorage:
         rows = self._query(
             """
             DECLARE $event_id AS Int64;
-            SELECT * FROM event_slots
+            SELECT * FROM event_slots VIEW idx_slots_event
             WHERE event_id = $event_id
             ORDER BY starts_at;
             """,
             {"$event_id": _int(event_id)},
         )
         return [_slot(row) for row in rows]
+
+    def _event_slots_for_events(self, event_ids: list[int] | set[int]) -> dict[int, list[EventSlot]]:
+        ids = sorted({int(event_id) for event_id in event_ids})
+        if not ids:
+            return {}
+        rows = self._query(
+            """
+            DECLARE $event_ids AS List<Int64>;
+            SELECT * FROM event_slots VIEW idx_slots_event
+            WHERE event_id IN $event_ids
+            ORDER BY event_id, starts_at;
+            """,
+            {"$event_ids": _int_list(ids)},
+        )
+        slots_by_event: dict[int, list[EventSlot]] = {event_id: [] for event_id in ids}
+        for row in rows:
+            slot = _slot(row)
+            slots_by_event.setdefault(slot.event_id, []).append(slot)
+        return slots_by_event
+
+    def _attach_event_images_for_events(self, events: list[Event]) -> None:
+        if not events:
+            return
+        event_ids = [event.id for event in events]
+        rows = self._query(
+            """
+            DECLARE $event_ids AS List<Int64>;
+            SELECT event_id, token, url FROM event_images
+            WHERE event_id IN $event_ids;
+            """,
+            {"$event_ids": _int_list(event_ids)},
+        )
+        images = {int(row["event_id"]): row for row in rows}
+        for event in events:
+            row = images.get(event.id)
+            if row is None:
+                event.image_token = None
+                event.image_url = None
+                continue
+            token = row.get("token")
+            url = row.get("url")
+            event.image_token = str(token) if token else None
+            event.image_url = str(url) if url else None
+
+    def _events_by_ids(
+        self,
+        event_ids: list[int] | set[int],
+        *,
+        with_slots: bool = True,
+        with_images: bool = True,
+    ) -> dict[int, Event]:
+        ids = sorted({int(event_id) for event_id in event_ids})
+        if not ids:
+            return {}
+        rows = self._query(
+            """
+            DECLARE $event_ids AS List<Int64>;
+            SELECT * FROM events
+            WHERE id IN $event_ids;
+            """,
+            {"$event_ids": _int_list(ids)},
+        )
+        events = {int(row["id"]): _event(row) for row in rows}
+        if with_slots:
+            slots_by_event = self._event_slots_for_events(list(events.keys()))
+            for event in events.values():
+                event.slots = slots_by_event.get(event.id, [])
+        if with_images:
+            self._attach_event_images_for_events(list(events.values()))
+        return events
+
+    def _attach_registrations_batch(
+        self,
+        registrations: list[Registration],
+        *,
+        with_event: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
+    ) -> None:
+        if not registrations:
+            return
+        events: dict[int, Event] = {}
+        if with_event:
+            events = self._events_by_ids(
+                {registration.event_id for registration in registrations},
+                with_slots=True,
+                with_images=with_images,
+            )
+        slots: dict[int, EventSlot] = {}
+        if with_slot:
+            slot_ids = sorted(
+                {
+                    int(registration.slot_id)
+                    for registration in registrations
+                    if registration.slot_id is not None
+                }
+            )
+            if slot_ids:
+                rows = self._query(
+                    """
+                    DECLARE $slot_ids AS List<Int64>;
+                    SELECT * FROM event_slots
+                    WHERE id IN $slot_ids;
+                    """,
+                    {"$slot_ids": _int_list(slot_ids)},
+                )
+                slots = {int(row["id"]): _slot(row) for row in rows}
+        users: dict[int, User] = {}
+        if with_user:
+            user_ids = sorted({registration.user_id for registration in registrations})
+            rows = self._query(
+                """
+                DECLARE $user_ids AS List<Int64>;
+                SELECT * FROM users
+                WHERE user_id IN $user_ids;
+                """,
+                {"$user_ids": _int_list(user_ids)},
+            )
+            users = {int(row["user_id"]): _user(row) for row in rows}
+        for registration in registrations:
+            registration.event = events.get(registration.event_id) if with_event else None
+            registration.slot = slots.get(registration.slot_id) if registration.slot_id else None
+            registration.user = users.get(registration.user_id) if with_user else None
+
+    @staticmethod
+    def _registration_without_related_objects(registration: Registration) -> Registration:
+        return Registration(
+            id=registration.id,
+            code=registration.code,
+            user_id=registration.user_id,
+            event_id=registration.event_id,
+            slot_id=registration.slot_id,
+            status=registration.status,
+            notifications_enabled=registration.notifications_enabled,
+            created_at=registration.created_at,
+            updated_at=registration.updated_at,
+            canceled_at=registration.canceled_at,
+            attended_at=registration.attended_at,
+        )
 
     def _attach_registration(self, registration: Registration) -> Registration:
         registration.event = self.get_event(registration.event_id)
@@ -1498,6 +1679,31 @@ class YdbStorage:
         event.image_token = str(token) if token else None
         event.image_url = str(url) if url else None
         return event
+
+    def _attach_notifications_batch(self, notifications: list[NotificationOutbox]) -> None:
+        registration_ids = sorted(
+            {
+                int(item.registration_id)
+                for item in notifications
+                if item.registration_id is not None
+            }
+        )
+        if not registration_ids:
+            return
+        rows = self._query(
+            """
+            DECLARE $registration_ids AS List<Int64>;
+            SELECT * FROM registrations
+            WHERE id IN $registration_ids;
+            """,
+            {"$registration_ids": _int_list(registration_ids)},
+        )
+        registrations = [_registration(row) for row in rows]
+        self._attach_registrations_batch(registrations, with_user=False, with_images=False)
+        registrations_by_id = {registration.id: registration for registration in registrations}
+        for item in notifications:
+            if item.registration_id is not None:
+                item.registration = registrations_by_id.get(item.registration_id)
 
     def _delete_event_cascade(self, event_id: int) -> None:
         registration_rows = self._query(
@@ -1656,7 +1862,7 @@ class YdbStorage:
             tx,
             """
             DECLARE $user_id AS Int64;
-            SELECT id FROM consents
+            SELECT id FROM consents VIEW idx_consents_user
             WHERE user_id = $user_id AND profile_data_allowed = true
             LIMIT 1;
             """,
@@ -1679,7 +1885,7 @@ class YdbStorage:
             tx,
             """
             DECLARE $event_id AS Int64;
-            SELECT * FROM event_slots
+            SELECT * FROM event_slots VIEW idx_slots_event
             WHERE event_id = $event_id
             ORDER BY starts_at;
             """,
@@ -1703,7 +1909,7 @@ class YdbStorage:
             tx,
             """
             DECLARE $user_id AS Int64;
-            SELECT id FROM role_assignments
+            SELECT id FROM role_assignments VIEW idx_roles_user
             WHERE user_id = $user_id AND role = "admin"
             LIMIT 1;
             """,
@@ -1715,7 +1921,7 @@ class YdbStorage:
             """
             DECLARE $user_id AS Int64;
             DECLARE $event_id AS Int64;
-            SELECT id FROM organizer_events
+            SELECT id FROM organizer_events VIEW idx_organizer_events_user
             WHERE user_id = $user_id AND event_id = $event_id
             LIMIT 1;
             """,
@@ -1882,23 +2088,27 @@ class YdbStorage:
         *,
         now: datetime,
         render_reminder: ReminderRenderer,
+        existing_items_by_kind: dict[NotificationKind, list[NotificationOutbox]] | None = None,
     ) -> int:
         changed = 0
         for kind, send_after in automatic_reminder_schedule(event, registration):
-            rows = self._query(
-                """
-                DECLARE $registration_id AS Int64;
-                DECLARE $kind AS Utf8;
-                SELECT * FROM notification_outbox
-                WHERE registration_id = $registration_id AND kind = $kind
-                ORDER BY id;
-                """,
-                {
-                    "$registration_id": _int(registration.id),
-                    "$kind": _utf8(kind.value),
-                },
-            )
-            items = [_notification(row) for row in rows]
+            if existing_items_by_kind is None:
+                rows = self._query(
+                    """
+                    DECLARE $registration_id AS Int64;
+                    DECLARE $kind AS Utf8;
+                    SELECT * FROM notification_outbox VIEW idx_outbox_registration
+                    WHERE registration_id = $registration_id AND kind = $kind
+                    ORDER BY id;
+                    """,
+                    {
+                        "$registration_id": _int(registration.id),
+                        "$kind": _utf8(kind.value),
+                    },
+                )
+                items = [_notification(row) for row in rows]
+            else:
+                items = list(existing_items_by_kind.get(kind, []))
             pending_items = [item for item in items if item.status == OutboxStatus.PENDING]
             has_non_skipped = any(item.status != OutboxStatus.SKIPPED for item in items)
             if send_after < now and not pending_items:
@@ -1953,6 +2163,30 @@ class YdbStorage:
             )
             changed += 1
         return changed
+
+    def _notifications_by_registration_ids(
+        self,
+        registration_ids: list[int],
+    ) -> dict[int, dict[NotificationKind, list[NotificationOutbox]]]:
+        ids = sorted({int(registration_id) for registration_id in registration_ids})
+        if not ids:
+            return {}
+        rows = self._query(
+            """
+            DECLARE $registration_ids AS List<Int64>;
+            SELECT * FROM notification_outbox VIEW idx_outbox_registration
+            WHERE registration_id IN $registration_ids
+            ORDER BY registration_id, kind, id;
+            """,
+            {"$registration_ids": _int_list(ids)},
+        )
+        grouped: dict[int, dict[NotificationKind, list[NotificationOutbox]]] = {
+            registration_id: {} for registration_id in ids
+        }
+        for row in rows:
+            item = _notification(row)
+            grouped.setdefault(item.registration_id or 0, {}).setdefault(item.kind, []).append(item)
+        return grouped
 
     def _update_pending_reminder(
         self,
@@ -2199,6 +2433,13 @@ def _row_dt(row, name: str) -> datetime | None:
 
 def _int(value: int) -> ydb.TypedValue:
     return ydb.TypedValue(int(value), ydb.PrimitiveType.Int64)
+
+
+def _int_list(values) -> ydb.TypedValue:
+    return ydb.TypedValue(
+        [int(value) for value in values],
+        ydb.ListType(ydb.PrimitiveType.Int64),
+    )
 
 
 def _uint64(value: int) -> ydb.TypedValue:
