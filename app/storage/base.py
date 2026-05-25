@@ -33,6 +33,15 @@ class Storage(Protocol):
         now: datetime | None = None,
     ) -> User: ...
 
+    def touch_user(
+        self,
+        user_id: int,
+        display_name: str,
+        *,
+        is_bot: bool = False,
+        now: datetime | None = None,
+    ) -> None: ...
+
     def get_user(self, user_id: int) -> User | None: ...
 
     def get_last_bot_message_id(self, user_id: int) -> str | None: ...
@@ -141,6 +150,8 @@ class Storage(Protocol):
 
     def clear_pending_event_image(self, user_id: int) -> None: ...
 
+    def clear_user_draft_state(self, user_id: int) -> None: ...
+
     def list_events(
         self,
         *,
@@ -183,7 +194,15 @@ class Storage(Protocol):
 
     def get_registration(self, registration_id: int) -> Registration | None: ...
 
-    def list_user_registrations(self, user_id: int) -> list[Registration]: ...
+    def list_user_registrations(
+        self,
+        user_id: int,
+        *,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
+    ) -> list[Registration]: ...
 
     def get_active_registration_for_event(
         self,
@@ -207,6 +226,8 @@ class Storage(Protocol):
     def list_roles(self, role: str) -> list[RoleAssignment]: ...
 
     def has_role(self, user_id: int, role: str) -> bool: ...
+
+    def get_user_roles(self, user_id: int) -> set[str]: ...
 
     def delete_role(self, user_id: int, role: str) -> bool: ...
 

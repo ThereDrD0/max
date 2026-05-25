@@ -7,6 +7,72 @@ from app.storage.entities import NotificationOutbox
 from tests.conftest import create_event
 
 
+async def test_notification_worker_skips_repair_sync_outside_window_but_sends_due(
+    storage,
+    fake_bot,
+    fixed_now,
+    monkeypatch,
+):
+    event = create_event(storage, fixed_now, title="Консультация по приёму", capacity=10)
+    storage.add_notification(
+        NotificationOutbox(
+            id=0,
+            event_id=event.id,
+            registration_id=None,
+            user_id=101,
+            kind=NotificationKind.VENUE_CHANGED,
+            message_text="Изменилась аудитория.",
+            send_after=fixed_now,
+        )
+    )
+
+    def fail_sync(*args, **kwargs):
+        raise AssertionError("Обычный timer вне sync-окна не должен запускать repair-синхронизацию")
+
+    monkeypatch.setattr(storage, "sync_registration_reminders", fail_sync)
+    worker = NotificationWorker(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now.replace(minute=30),
+        max_rps=1000,
+        reminder_sync_interval_minutes=60,
+        reminder_sync_window_minutes=5,
+    )
+
+    sent_count = await worker.process_due(limit=10)
+
+    assert sent_count == 1
+    assert fake_bot.sent[-1]["text"] == "Изменилась аудитория."
+
+
+async def test_notification_worker_runs_repair_sync_inside_window(
+    storage,
+    fake_bot,
+    fixed_now,
+    monkeypatch,
+):
+    sync_calls = []
+
+    def sync_registration_reminders(**kwargs):
+        sync_calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(storage, "sync_registration_reminders", sync_registration_reminders)
+    worker = NotificationWorker(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now.replace(minute=1),
+        max_rps=1000,
+        reminder_sync_interval_minutes=60,
+        reminder_sync_window_minutes=5,
+    )
+
+    sent_count = await worker.process_due(limit=10)
+
+    assert sent_count == 0
+    assert len(sync_calls) == 1
+
+
 async def test_notification_worker_sends_due_items_and_skips_disabled_registration(
     storage, fake_bot, fixed_now
 ):

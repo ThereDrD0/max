@@ -44,6 +44,20 @@ class RegistrationService:
             now=self.now(),
         )
 
+    def touch_user(
+        self,
+        user_id: int,
+        display_name: str,
+        *,
+        is_bot: bool = False,
+    ) -> None:
+        self.storage.touch_user(
+            user_id,
+            display_name,
+            is_bot=is_bot,
+            now=self.now(),
+        )
+
     def record_profile_consent(
         self,
         user_id: int,
@@ -126,8 +140,22 @@ class RegistrationService:
             now=self.now(),
         )
 
-    def list_user_registrations(self, user_id: int) -> list[Registration]:
-        return self.storage.list_user_registrations(user_id)
+    def list_user_registrations(
+        self,
+        user_id: int,
+        *,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
+    ) -> list[Registration]:
+        return self.storage.list_user_registrations(
+            user_id,
+            with_event_slots=with_event_slots,
+            with_slot=with_slot,
+            with_user=with_user,
+            with_images=with_images,
+        )
 
     @staticmethod
     def _render_reminder(

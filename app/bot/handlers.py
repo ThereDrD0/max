@@ -171,7 +171,7 @@ class BotHandlers:
         chat_id: int | None,
         start_payload: str | None = None,
     ) -> None:
-        self.registration_service.upsert_user(user_id, display_name)
+        self.registration_service.touch_user(user_id, display_name)
         if start_payload:
             await self._send_deeplink_entrypoint(user_id, chat_id, start_payload)
             return
@@ -186,18 +186,16 @@ class BotHandlers:
         source_message_id: str | None = None,
         attachments: list | None = None,
     ) -> None:
-        self.registration_service.upsert_user(user_id, display_name)
+        self.registration_service.touch_user(user_id, display_name)
         self._source_user_message_id = source_message_id
         try:
             normalized = (text or "").strip()
             if normalized == "/organizer":
-                self.storage.clear_organizer_state(user_id)
-                self.storage.clear_pending_event_image(user_id)
+                self.storage.clear_user_draft_state(user_id)
                 await self._send_organizer_menu(user_id, chat_id)
                 return
             if normalized == "/admin":
-                self.storage.clear_organizer_state(user_id)
-                self.storage.clear_pending_event_image(user_id)
+                self.storage.clear_user_draft_state(user_id)
                 await self._send_admin_menu(user_id, chat_id)
                 return
             organizer_state = self.storage.get_organizer_state(user_id)
@@ -247,7 +245,7 @@ class BotHandlers:
         payload: str,
         source_message_id: str | None = None,
     ) -> None:
-        self.registration_service.upsert_user(user_id, display_name)
+        self.registration_service.touch_user(user_id, display_name)
         data = Payload.unpack(payload)
         self._source_message_id = source_message_id
         try:
@@ -284,8 +282,7 @@ class BotHandlers:
                 return
             await self._send_event_detail(user_id, chat_id, event.id)
         elif data.action == "main_menu":
-            self.storage.clear_organizer_state(user_id)
-            self.storage.clear_pending_event_image(user_id)
+            self.storage.clear_user_draft_state(user_id)
             await self._send_main_menu(user_id, chat_id)
         elif data.action == "catalog":
             await self._send_catalog(user_id, chat_id, page=self._payload_page(data))
@@ -691,8 +688,12 @@ class BotHandlers:
         await self._send_main_menu(user_id, chat_id)
 
     async def _send_main_menu(self, user_id: int, chat_id: int | None) -> None:
-        can_use_organizer_menu = self.organizer_service.can_use_menu(user_id)
-        can_use_admin_menu = self.admin_service.can_use_menu(user_id)
+        roles = self.storage.get_user_roles(user_id)
+        can_use_organizer_menu = self.organizer_service.can_use_menu(
+            user_id,
+            roles=roles,
+        )
+        can_use_admin_menu = self.admin_service.can_use_menu(user_id, roles=roles)
         rows = [
             [callback_button("📚 Мероприятия", Payload("catalog"))],
             [callback_button("🎫 Мои записи", Payload("my_regs"))],
@@ -1498,7 +1499,13 @@ class BotHandlers:
     def _visible_user_registrations(self, user_id: int) -> list[Registration]:
         registrations = [
             registration
-            for registration in self.registration_service.list_user_registrations(user_id)
+            for registration in self.registration_service.list_user_registrations(
+                user_id,
+                with_event_slots=False,
+                with_slot=False,
+                with_user=False,
+                with_images=False,
+            )
             if self._registration_visible_to_user(registration)
         ]
         active_event_ids = {
@@ -3383,11 +3390,12 @@ class BotHandlers:
                 if format is not None:
                     edit_kwargs["format"] = format
                 message_id = await self.bot.edit_message(**edit_kwargs)
-                self.storage.set_last_bot_message_id(
-                    user_id,
-                    message_id or self._source_message_id,
-                    now=self.now(),
-                )
+                if message_id and message_id != self._source_message_id:
+                    self.storage.set_last_bot_message_id(
+                        user_id,
+                        message_id,
+                        now=self.now(),
+                    )
                 await self._delete_source_user_message()
                 return
             except Exception:

@@ -27,8 +27,14 @@ class AdminService:
         }
         self.now = now or (lambda: datetime.now(timezone.utc))
 
-    def can_use_menu(self, actor_user_id: int) -> bool:
-        return self.storage.has_role(actor_user_id, "admin")
+    def can_use_menu(
+        self,
+        actor_user_id: int,
+        *,
+        roles: set[str] | None = None,
+    ) -> bool:
+        roles = roles if roles is not None else self.storage.get_user_roles(actor_user_id)
+        return "admin" in roles
 
     def add_organizer(
         self,

@@ -29,21 +29,26 @@ class NotificationWorker:
         now: Callable[[], datetime] | None = None,
         max_rps: int = 30,
         max_bot_username: str = "",
+        reminder_sync_interval_minutes: int = 60,
+        reminder_sync_window_minutes: int = 5,
     ) -> None:
         self.storage = storage
         self.bot_client = bot_client
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.max_rps = max(max_rps, 1)
         self.max_bot_username = max_bot_username
+        self.reminder_sync_interval_minutes = max(reminder_sync_interval_minutes, 0)
+        self.reminder_sync_window_minutes = max(reminder_sync_window_minutes, 0)
         self._bot_username: str | None = None
         self._bot_username_loaded = False
 
     async def process_due(self, *, limit: int = 100) -> int:
         current = self.now()
-        self.storage.sync_registration_reminders(
-            now=current,
-            render_reminder=render_automatic_reminder,
-        )
+        if self._should_sync_reminders(current):
+            self.storage.sync_registration_reminders(
+                now=current,
+                render_reminder=render_automatic_reminder,
+            )
         items = self.storage.list_due_notifications(now=current, limit=limit)
         sent = 0
         delay = 1 / self.max_rps
@@ -82,6 +87,16 @@ class NotificationWorker:
             if delay > 0:
                 await asyncio.sleep(delay)
         return sent
+
+    def _should_sync_reminders(self, now: datetime) -> bool:
+        interval = self.reminder_sync_interval_minutes
+        if interval <= 0:
+            return False
+        window = min(self.reminder_sync_window_minutes, interval)
+        if window <= 0:
+            return False
+        minute_index = int(now.timestamp() // 60)
+        return minute_index % interval < window
 
     async def _notification_attachments(self, item: NotificationOutbox) -> list | None:
         event = self._notification_event(item)

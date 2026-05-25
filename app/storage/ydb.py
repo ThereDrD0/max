@@ -117,6 +117,59 @@ class YdbStorage:
         )
         return user
 
+    def touch_user(
+        self,
+        user_id: int,
+        display_name: str,
+        *,
+        is_bot: bool = False,
+        now: datetime | None = None,
+    ) -> None:
+        current = _dt(now or utc_now())
+        clean_display_name = (display_name or "").strip()
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DECLARE $display_name AS Utf8;
+            DECLARE $default_display_name AS Utf8;
+            DECLARE $is_bot AS Bool;
+            DECLARE $updated_at AS Timestamp;
+
+            UPDATE users
+            SET
+                display_name = CASE
+                    WHEN $display_name != "" THEN $display_name
+                    ELSE display_name
+                END,
+                is_bot = $is_bot,
+                updated_at = $updated_at
+            WHERE user_id = $user_id;
+
+            INSERT INTO users (
+                user_id, display_name, is_bot, created_at, updated_at
+            )
+            SELECT
+                $user_id,
+                CASE
+                    WHEN $display_name != "" THEN $display_name
+                    ELSE $default_display_name
+                END,
+                $is_bot,
+                $updated_at,
+                $updated_at
+            WHERE NOT EXISTS (
+                SELECT user_id FROM users WHERE user_id = $user_id
+            );
+            """,
+            {
+                "$user_id": _int(user_id),
+                "$display_name": _utf8(clean_display_name),
+                "$default_display_name": _utf8(f"Пользователь {user_id}"),
+                "$is_bot": _bool(is_bot),
+                "$updated_at": _timestamp(current),
+            },
+        )
+
     def get_user(self, user_id: int) -> User | None:
         row = self._one(
             """
@@ -511,6 +564,16 @@ class YdbStorage:
             {"$user_id": _int(user_id)},
         )
 
+    def clear_user_draft_state(self, user_id: int) -> None:
+        self._execute(
+            """
+            DECLARE $user_id AS Int64;
+            DELETE FROM organizer_states WHERE user_id = $user_id;
+            DELETE FROM pending_event_images WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+
     def list_events(
         self,
         *,
@@ -759,7 +822,15 @@ class YdbStorage:
         )
         return self._attach_registration(_registration(row)) if row else None
 
-    def list_user_registrations(self, user_id: int) -> list[Registration]:
+    def list_user_registrations(
+        self,
+        user_id: int,
+        *,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
+    ) -> list[Registration]:
         rows = self._query(
             """
             DECLARE $user_id AS Int64;
@@ -770,7 +841,13 @@ class YdbStorage:
             {"$user_id": _int(user_id)},
         )
         registrations = [_registration(row) for row in rows]
-        self._attach_registrations_batch(registrations)
+        self._attach_registrations_batch(
+            registrations,
+            with_event_slots=with_event_slots,
+            with_slot=with_slot,
+            with_user=with_user,
+            with_images=with_images,
+        )
         return registrations
 
     def get_active_registration_for_event(
@@ -884,6 +961,17 @@ class YdbStorage:
 
     def has_role(self, user_id: int, role: str) -> bool:
         return self.get_role(user_id, role) is not None
+
+    def get_user_roles(self, user_id: int) -> set[str]:
+        rows = self._query(
+            """
+            DECLARE $user_id AS Int64;
+            SELECT role FROM role_assignments VIEW idx_roles_user
+            WHERE user_id = $user_id;
+            """,
+            {"$user_id": _int(user_id)},
+        )
+        return {str(row["role"]) for row in rows if row.get("role")}
 
     def delete_role(self, user_id: int, role: str) -> bool:
         item = self.get_role(user_id, role)
@@ -1677,6 +1765,7 @@ class YdbStorage:
         registrations: list[Registration],
         *,
         with_event: bool = True,
+        with_event_slots: bool = True,
         with_slot: bool = True,
         with_user: bool = True,
         with_images: bool = True,
@@ -1687,7 +1776,7 @@ class YdbStorage:
         if with_event:
             events = self._events_by_ids(
                 {registration.event_id for registration in registrations},
-                with_slots=True,
+                with_slots=with_event_slots,
                 with_images=with_images,
             )
         slots: dict[int, EventSlot] = {}

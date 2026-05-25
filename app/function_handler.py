@@ -155,6 +155,8 @@ async def _handle_timer(
         now=now,
         max_rps=settings.max_api_rps,
         max_bot_username=settings.max_bot_username,
+        reminder_sync_interval_minutes=settings.reminder_sync_interval_minutes,
+        reminder_sync_window_minutes=settings.reminder_sync_window_minutes,
     )
     sent = await worker.process_due(limit=100)
     return _response(200, {"ok": True, "sent": sent, "removed_events": removed_events})

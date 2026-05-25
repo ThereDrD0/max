@@ -38,6 +38,14 @@ class Settings(BaseSettings):
         alias="ORGANIZER_USER_IDS",
     )
     max_api_rps: int = Field(default=30, alias="MAX_API_RPS")
+    reminder_sync_interval_minutes: int = Field(
+        default=60,
+        alias="REMINDER_SYNC_INTERVAL_MINUTES",
+    )
+    reminder_sync_window_minutes: int = Field(
+        default=5,
+        alias="REMINDER_SYNC_WINDOW_MINUTES",
+    )
     performance_metrics_enabled: bool = Field(
         default=True,
         alias="PERFORMANCE_METRICS_ENABLED",

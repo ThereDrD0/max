@@ -1142,6 +1142,161 @@ async def test_event_detail_uses_direct_active_registration_lookup(
     assert f"Код записи: {registration.code}" in detail["text"]
 
 
+async def test_callback_touches_user_without_full_upsert(storage, fake_bot, fixed_now, monkeypatch):
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+    )
+    touched = []
+    original_upsert = storage.upsert_user
+
+    def touch_user(user_id, display_name, **kwargs):
+        touched.append((user_id, display_name, kwargs))
+        original_upsert(user_id, display_name, now=kwargs.get("now"))
+        storage.record_profile_consent(user_id, "docs", now=fixed_now)
+
+    def fail_upsert(*args, **kwargs):
+        raise AssertionError("Callback не должен делать полный upsert_user")
+
+    monkeypatch.setattr(storage, "touch_user", touch_user, raising=False)
+    monkeypatch.setattr(storage, "upsert_user", fail_upsert)
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("main_menu").pack(),
+        source_message_id="mid.1",
+    )
+
+    assert touched
+    assert fake_bot.edited[-1]["message_id"] == "mid.1"
+
+
+async def test_main_menu_reads_roles_once(storage, fake_bot, fixed_now, monkeypatch):
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers.registration_service.upsert_user(501, "Администратор")
+    handlers.registration_service.record_profile_consent(501, "docs")
+
+    role_calls = []
+
+    def get_user_roles(user_id):
+        role_calls.append(user_id)
+        return {"organizer", "admin"}
+
+    def fail_has_role(*args, **kwargs):
+        raise AssertionError("Главное меню должно читать роли одним запросом")
+
+    monkeypatch.setattr(storage, "get_user_roles", get_user_roles, raising=False)
+    monkeypatch.setattr(storage, "has_role", fail_has_role)
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Администратор",
+        chat_id=9001,
+        payload=Payload("main_menu").pack(),
+        source_message_id="mid.1",
+    )
+
+    assert role_calls == [501]
+    text = fake_bot.edited[-1]["text"]
+    assert "/organizer" in text
+    assert "/admin" in text
+
+
+async def test_edit_message_with_same_id_does_not_store_last_message(storage, fake_bot, fixed_now, monkeypatch):
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers._source_message_id = "mid.1"
+
+    def fail_set_last(*args, **kwargs):
+        raise AssertionError("Редактирование того же сообщения не должно писать bot_sessions")
+
+    monkeypatch.setattr(storage, "set_last_bot_message_id", fail_set_last)
+
+    await handlers._send(user_id=101, chat_id=9001, text="Меню")
+
+    assert fake_bot.edited[-1]["message_id"] == "mid.1"
+
+
+async def test_command_clears_user_draft_state_once(storage, fake_bot, fixed_now, monkeypatch):
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers.registration_service.upsert_user(501, "Организатор")
+    handlers.registration_service.record_profile_consent(501, "docs")
+    storage.ensure_role(501, "organizer")
+    cleared = []
+
+    def touch_user(*args, **kwargs):
+        pass
+
+    def clear_user_draft_state(user_id):
+        cleared.append(user_id)
+
+    def fail_clear_organizer_state(*args, **kwargs):
+        raise AssertionError("Команда должна чистить черновики одним вызовом")
+
+    def fail_clear_pending_event_image(*args, **kwargs):
+        raise AssertionError("Команда должна чистить черновики одним вызовом")
+
+    monkeypatch.setattr(storage, "touch_user", touch_user, raising=False)
+    monkeypatch.setattr(storage, "clear_user_draft_state", clear_user_draft_state, raising=False)
+    monkeypatch.setattr(storage, "clear_organizer_state", fail_clear_organizer_state)
+    monkeypatch.setattr(storage, "clear_pending_event_image", fail_clear_pending_event_image)
+
+    await handlers.handle_message(501, "Организатор", 9001, "/organizer")
+
+    assert cleared == [501]
+
+
+async def test_my_registrations_uses_lightweight_registration_loading(
+    storage,
+    fake_bot,
+    fixed_now,
+    monkeypatch,
+):
+    event = create_event(storage, fixed_now, title="Консультация")
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+    calls = []
+
+    def list_user_registrations(user_id, **kwargs):
+        calls.append((user_id, kwargs))
+        registration.event = event
+        registration.slot = None
+        registration.user = None
+        return [registration]
+
+    monkeypatch.setattr(
+        handlers.registration_service,
+        "list_user_registrations",
+        list_user_registrations,
+    )
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs").pack(),
+        source_message_id="mid.1",
+    )
+
+    assert calls == [
+        (
+            101,
+            {
+                "with_event_slots": False,
+                "with_slot": False,
+                "with_user": False,
+                "with_images": False,
+            },
+        )
+    ]
+    assert "Консультация" in fake_bot.edited[-1]["text"]
+
+
 async def test_event_detail_refreshes_available_places_after_other_registration(
     storage, fake_bot, fixed_now
 ):

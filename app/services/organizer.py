@@ -46,8 +46,14 @@ class OrganizerService:
             with_images=False,
         )
 
-    def can_use_menu(self, actor_user_id: int) -> bool:
-        return self.storage.has_role(actor_user_id, "organizer") or self.storage.has_role(actor_user_id, "admin")
+    def can_use_menu(
+        self,
+        actor_user_id: int,
+        *,
+        roles: set[str] | None = None,
+    ) -> bool:
+        roles = roles if roles is not None else self.storage.get_user_roles(actor_user_id)
+        return "organizer" in roles or "admin" in roles
 
     def get_event_registrations(
         self,

@@ -113,6 +113,21 @@ class MemoryStorage:
                 user.updated_at = current
             return user
 
+    def touch_user(
+        self,
+        user_id: int,
+        display_name: str,
+        *,
+        is_bot: bool = False,
+        now: datetime | None = None,
+    ) -> None:
+        self.upsert_user(
+            user_id,
+            display_name,
+            is_bot=is_bot,
+            now=now,
+        )
+
     def get_user(self, user_id: int) -> User | None:
         return self.users.get(user_id)
 
@@ -399,6 +414,11 @@ class MemoryStorage:
         with self._lock:
             self.pending_event_images.pop(user_id, None)
 
+    def clear_user_draft_state(self, user_id: int) -> None:
+        with self._lock:
+            self.organizer_states.pop(user_id, None)
+            self.pending_event_images.pop(user_id, None)
+
     def available_places(self, event_id: int, slot_id: int | None) -> int:
         event = self._require_event(event_id)
         event.slots = self._event_slots(event_id)
@@ -517,13 +537,27 @@ class MemoryStorage:
         registration = self.registrations.get(registration_id)
         return self._attach_registration(registration) if registration else None
 
-    def list_user_registrations(self, user_id: int) -> list[Registration]:
+    def list_user_registrations(
+        self,
+        user_id: int,
+        *,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
+    ) -> list[Registration]:
         registrations = [
             item
             for item in self.registrations.values()
             if item.user_id == user_id
         ]
-        self._attach_registrations_batch(registrations)
+        self._attach_registrations_batch(
+            registrations,
+            with_event_slots=with_event_slots,
+            with_slot=with_slot,
+            with_user=with_user,
+            with_images=with_images,
+        )
         return sorted(
             registrations,
             key=lambda item: item.created_at,
@@ -597,6 +631,13 @@ class MemoryStorage:
 
     def has_role(self, user_id: int, role: str) -> bool:
         return self.get_role(user_id, role) is not None
+
+    def get_user_roles(self, user_id: int) -> set[str]:
+        return {
+            item.role
+            for item in self.roles.values()
+            if item.user_id == user_id
+        }
 
     def delete_role(self, user_id: int, role: str) -> bool:
         with self._lock:
@@ -1205,6 +1246,7 @@ class MemoryStorage:
         registrations: list[Registration],
         *,
         with_event: bool = True,
+        with_event_slots: bool = True,
         with_slot: bool = True,
         with_user: bool = True,
         with_images: bool = True,
@@ -1215,7 +1257,7 @@ class MemoryStorage:
         if with_event:
             events_by_id = self._events_by_ids(
                 {registration.event_id for registration in registrations},
-                with_slots=True,
+                with_slots=with_event_slots,
                 with_images=with_images,
             )
         slots_by_id = self.slots if with_slot else {}

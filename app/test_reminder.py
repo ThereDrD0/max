@@ -89,6 +89,8 @@ async def _send_due_now(storage: Storage, settings: Settings) -> int:
         MaxApiBotClient(settings.max_bot_token),
         max_rps=settings.max_api_rps,
         max_bot_username=settings.max_bot_username,
+        reminder_sync_interval_minutes=settings.reminder_sync_interval_minutes,
+        reminder_sync_window_minutes=settings.reminder_sync_window_minutes,
     )
     return await worker.process_due(limit=100)
 
