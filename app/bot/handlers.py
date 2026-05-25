@@ -1451,9 +1451,9 @@ class BotHandlers:
                 else ""
             )
             lines.append(
-                f"\n{index}. {registration.event.title}\n"
-                f"Код: {registration.code}\n"
-                f"Статус: {self._format_status_for_user(registration.status)}"
+                f"\n{index}. ℹ️ {registration.event.title}\n"
+                f"🎫 Код: {registration.code}\n"
+                f"✅ Статус: {self._format_status_for_user(registration.status)}"
                 f"{closed_registration_text}"
             )
             is_active = registration.status in ACTIVE_REGISTRATION_STATUSES
