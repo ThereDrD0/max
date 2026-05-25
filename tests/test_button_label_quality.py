@@ -116,6 +116,18 @@ def test_all_bot_ui_texts_follow_glossary_terms() -> None:
     assert defects == []
 
 
+def test_all_bot_ui_texts_do_not_use_low_contrast_plus_minus_emojis() -> None:
+    forbidden = {"➕", "➖"}
+    defects = [
+        f"{text.source}: замените плохо видимый эмодзи {emoji!r}: {text.text!r}"
+        for text in _collect_ui_texts()
+        for emoji in forbidden
+        if emoji in text.text
+    ]
+
+    assert defects == []
+
+
 def test_all_bot_ui_texts_do_not_have_adjacent_emojis() -> None:
     defects = [
         f"{text.source}: рядом стоят два эмодзи: {text.text!r}"

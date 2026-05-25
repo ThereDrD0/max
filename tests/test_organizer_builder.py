@@ -975,7 +975,7 @@ async def test_builder_slot_prompt_explains_slots_and_uses_consistent_buttons(
     assert "🧩 Слоты" in message["text"]
     assert "отдельные временные окна" in message["text"]
     assert "🚫 Без слотов" in _button_texts(message)
-    assert "➕ Добавить слот" in _button_texts(message)
+    assert "🧩 Добавить слот" in _button_texts(message)
     assert "Добавьте слоты" not in message["text"]
 
 

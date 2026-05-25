@@ -64,9 +64,10 @@ async def test_admin_menu_is_available_only_for_admins(storage, fake_bot, fixed_
     admin_menu = fake_bot.sent[-1]
     assert "🛠️ Меню администратора" in admin_menu["text"]
     assert _button_texts(admin_menu) == (
-        "➕ Добавить Организатора ➖ Удалить Организатора "
-        "📚 Список Организаторов 🏠 Главное меню"
+        "👤 Добавить Организатора 🗑️ Удалить Организатора "
+        "👥 Список Организаторов 🏠 Главное меню"
     )
+    _assert_admin_ui_has_no_low_contrast_or_book_emojis(admin_menu)
     assert _has_uploaded_image(admin_menu)
 
 
@@ -171,11 +172,12 @@ async def test_admin_organizer_book_paginates_and_detail_can_remove(
     )
 
     first_page = fake_bot.sent[-1]
-    assert "📚 Книга Организаторов" in first_page["text"]
+    assert "👥 Список Организаторов" in first_page["text"]
     assert "Страница 1/2" in first_page["text"]
     assert "8. [Организатор 08](max://user/708)" in first_page["text"]
     assert "9. [Организатор 09](max://user/709)" not in first_page["text"]
     assert [len(row) for row in _keyboard_rows(first_page)[:4]] == [2, 2, 2, 2]
+    _assert_admin_ui_has_no_low_contrast_or_book_emojis(first_page)
 
     await handlers.handle_callback(
         501,
@@ -188,7 +190,8 @@ async def test_admin_organizer_book_paginates_and_detail_can_remove(
     assert "🧑‍💼 Управление Организатором" in detail["text"]
     assert "[Организатор 01](max://user/701)" in detail["text"]
     assert "Кем добавлен: [Администратор](max://user/501)" in detail["text"]
-    assert "➖ Удалить Организатора" in _button_texts(detail)
+    assert "🗑️ Удалить Организатора" in _button_texts(detail)
+    _assert_admin_ui_has_no_low_contrast_or_book_emojis(detail)
     assert detail["format"] == "markdown"
 
     await handlers.handle_callback(
@@ -198,6 +201,7 @@ async def test_admin_organizer_book_paginates_and_detail_can_remove(
         Payload("admin_org_remove_confirm", event_id=701, value="0").pack(),
     )
     assert "Удалить Организатора" in fake_bot.sent[-1]["text"]
+    _assert_admin_ui_has_no_low_contrast_or_book_emojis(fake_bot.sent[-1])
 
     await handlers.handle_callback(
         501,
@@ -242,3 +246,9 @@ def _has_uploaded_image(message: dict) -> bool:
         and bool((attachment.get("payload") or {}).get("token"))
         for attachment in message["attachments"]
     )
+
+
+def _assert_admin_ui_has_no_low_contrast_or_book_emojis(message: dict) -> None:
+    ui_text = " ".join([message["text"], _button_texts(message)])
+    for emoji in ("➕", "➖", "📚"):
+        assert emoji not in ui_text

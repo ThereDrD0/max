@@ -388,7 +388,7 @@ class BotHandlers:
                     [
                         [
                             callback_button(
-                                "📚 К списку",
+                                "👥 К списку",
                                 Payload("admin_org_list", value=data.value),
                             )
                         ],
@@ -756,10 +756,10 @@ class BotHandlers:
             return
         rows = [
             [
-                callback_button("➕ Добавить Организатора", Payload("admin_org_add")),
-                callback_button("➖ Удалить Организатора", Payload("admin_org_remove")),
+                callback_button("👤 Добавить Организатора", Payload("admin_org_add")),
+                callback_button("🗑️ Удалить Организатора", Payload("admin_org_remove")),
             ],
-            [callback_button("📚 Список Организаторов", Payload("admin_org_list"))],
+            [callback_button("👥 Список Организаторов", Payload("admin_org_list"))],
             [self._main_menu_button()],
         ]
         await self._send(
@@ -833,7 +833,7 @@ class BotHandlers:
                         [
                             [
                                 callback_button(
-                                    "📚 Список Организаторов",
+                                    "👥 Список Организаторов",
                                     Payload("admin_org_list"),
                                 )
                             ],
@@ -850,7 +850,7 @@ class BotHandlers:
                 text=f"Организатор {self._admin_user_label(role.user_id)} удален.",
                 attachments=inline_keyboard(
                     [
-                        [callback_button("📚 Список Организаторов", Payload("admin_org_list"))],
+                        [callback_button("👥 Список Организаторов", Payload("admin_org_list"))],
                         [callback_button("⬅️ В меню администратора", Payload("admin_menu"))],
                     ]
                 ),
@@ -905,7 +905,7 @@ class BotHandlers:
                 user_id=user_id,
                 chat_id=chat_id,
                 text=(
-                    "📚 Книга Организаторов\n"
+                    "👥 Список Организаторов\n"
                     "Страница 1/1\n\n"
                     "Пока Организаторов нет."
                 ),
@@ -925,10 +925,10 @@ class BotHandlers:
             page * ADMIN_ORGANIZER_BOOK_PAGE_SIZE : (page + 1) * ADMIN_ORGANIZER_BOOK_PAGE_SIZE
         ]
         lines = [
-            "📚 Книга Организаторов",
+            "👥 Список Организаторов",
             f"Страница {page + 1}/{total_pages}",
             "",
-            "Листайте книгу кнопками ниже и открывайте нужного Организатора.",
+            "Листайте список кнопками ниже и открывайте нужного Организатора.",
         ]
         current_row: list[dict] = []
         for offset, role in enumerate(page_roles, start=first_offset):
@@ -1000,7 +1000,7 @@ class BotHandlers:
         rows = [
             [
                 callback_button(
-                    "➖ Удалить Организатора",
+                    "🗑️ Удалить Организатора",
                     Payload(
                         "admin_org_remove_confirm",
                         event_id=role.user_id,
@@ -1011,7 +1011,7 @@ class BotHandlers:
             ],
             [
                 callback_button(
-                    "📚 К списку",
+                    "👥 К списку",
                     Payload("admin_org_list", value=str(page)),
                 )
             ],
@@ -1048,7 +1048,7 @@ class BotHandlers:
                 [
                     [
                         callback_button(
-                            "➖ Удалить",
+                            "🗑️ Удалить",
                             Payload(
                                 "admin_org_remove_apply",
                                 event_id=role.user_id,
@@ -2808,7 +2808,7 @@ class BotHandlers:
                 "🧩 Слоты — это отдельные временные окна внутри одного мероприятия. "
                 "Например, две группы экскурсий: 10:00-11:00 и 11:15-12:15.\n\n"
                 "Если мероприятие одно общее, нажмите «🚫 Без слотов». "
-                "Если нужны группы по времени, нажмите «➕ Добавить слот» "
+                "Если нужны группы по времени, нажмите «🧩 Добавить слот» "
                 "и затем введите начало, конец и лимит мест."
             ),
             "slot_start": "Введите время начала слота.",
@@ -2833,11 +2833,11 @@ class BotHandlers:
         elif state.step == "slots_intro":
             if not self._event_has_active_registrations(user_id, state):
                 rows.append([callback_button("🚫 Без слотов", Payload("org_builder_no_slots"))])
-                rows.append([callback_button("➕ Добавить слот", Payload("org_builder_slots_add"))])
+                rows.append([callback_button("🧩 Добавить слот", Payload("org_builder_slots_add"))])
         elif state.step == "slot_next":
             rows.extend(
                 [
-                    [callback_button("➕ Добавить слот", Payload("org_builder_slots_add"))],
+                    [callback_button("🧩 Добавить слот", Payload("org_builder_slots_add"))],
                     [callback_button("✅ Завершить слоты", Payload("org_builder_slots_done"))],
                 ]
             )
