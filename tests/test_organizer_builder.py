@@ -473,7 +473,11 @@ async def test_organizer_participants_book_sorts_statuses_and_shows_action_butto
             handlers.registration_service.create_registration(user_id, event.id, None)
         )
     handlers.organizer_service.mark_attended(501, registrations[2].id)
-    handlers.registration_service.cancel_registration(104, registrations[3].id)
+    handlers.organizer_service.change_status(
+        501,
+        registrations[3].id,
+        RegistrationStatus.CANCELED_BY_ORGANIZER,
+    )
     handlers.organizer_service.change_status(
         501,
         registrations[4].id,
@@ -492,6 +496,7 @@ async def test_organizer_participants_book_sorts_statuses_and_shows_action_butto
     assert "👥 Участники мероприятия" in message["text"]
     assert "Нажмите на профиль записанного участника" in message["text"]
     assert "Страница 1/1" in message["text"]
+    assert message["text"].splitlines()[-1] == "Страница 1/1"
     assert "1. [Анна](max://user/102) - CONF1 - Записан" in message["text"]
     assert "2. [Яна](max://user/101) - CONF2 - Записан" in message["text"]
     assert "3. [Петр](max://user/103) - ATT01 - Пришел" in message["text"]
@@ -540,6 +545,7 @@ async def test_organizer_participants_book_paginates_eight_items(
 
     first_page = fake_bot.sent[-1]
     assert "Страница 1/2" in first_page["text"]
+    assert first_page["text"].splitlines()[-1] == "Страница 1/2"
     assert "8. [Участник 08](max://user/108) - CODE08 - Записан" in first_page["text"]
     assert "9. [Участник 09](max://user/109) - CODE09 - Записан" not in first_page["text"]
     first_buttons = {button["text"]: button for button in _buttons(first_page)}
@@ -558,6 +564,7 @@ async def test_organizer_participants_book_paginates_eight_items(
 
     second_page = fake_bot.sent[-1]
     assert "Страница 2/2" in second_page["text"]
+    assert second_page["text"].splitlines()[-1] == "Страница 2/2"
     assert "9. [Участник 09](max://user/109) - CODE09 - Записан" in second_page["text"]
     assert "1. [Участник 01](max://user/101) - CODE01 - Записан" not in second_page["text"]
     second_buttons = {button["text"]: button for button in _buttons(second_page)}
@@ -761,7 +768,12 @@ async def test_organizer_attendance_lookup_rejects_other_event_and_canceled_reco
         current_event.id,
         None,
     )
-    handlers.registration_service.cancel_registration(103, canceled_registration.id)
+    storage.change_status(
+        501,
+        canceled_registration.id,
+        RegistrationStatus.CANCELED_BY_ORGANIZER,
+        now=fixed_now,
+    )
 
     await handlers.handle_callback(
         user_id=501,
@@ -785,7 +797,7 @@ async def test_organizer_attendance_lookup_rejects_other_event_and_canceled_reco
 
     assert (
         storage.get_registration(canceled_registration.id).status
-        == RegistrationStatus.CANCELED_BY_USER
+        == RegistrationStatus.CANCELED_BY_ORGANIZER
     )
     assert "Отмененную запись нельзя отметить как пришедшую" in fake_bot.sent[-1]["text"]
 

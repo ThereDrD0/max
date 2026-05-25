@@ -117,16 +117,18 @@ def test_organizer_does_not_mark_canceled_registration_attended(
     fixed_now,
 ):
     event, registration = seed_event_with_registration(storage, fixed_now)
-    RegistrationService(storage, now=lambda: fixed_now).cancel_registration(
-        registration.user_id,
+    storage.change_status(
+        501,
         registration.id,
+        RegistrationStatus.CANCELED_BY_ORGANIZER,
+        now=fixed_now,
     )
     service = OrganizerService(storage, now=lambda: fixed_now)
 
     with pytest.raises(AttendanceMarkDeniedError):
         service.mark_attended_by_event_code(501, event.id, "123456")
 
-    assert storage.get_registration(registration.id).status == RegistrationStatus.CANCELED_BY_USER
+    assert storage.get_registration(registration.id).status == RegistrationStatus.CANCELED_BY_ORGANIZER
 
 
 def test_organizer_can_close_registration(storage, fixed_now):

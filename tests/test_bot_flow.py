@@ -177,6 +177,7 @@ async def test_organizer_menu_paginates_and_returns_to_same_page(
     first_page = fake_bot.sent[-1]
     assert "📚 Книга мероприятий Организатора" in first_page["text"]
     assert "Страница 1/3" in first_page["text"]
+    assert first_page["text"].splitlines()[-1] == "Страница 1/3"
     assert "🔥 БЛИЖАЙШИЕ" in first_page["text"]
     for day in range(1, 7):
         assert f"Мероприятие {day}" in first_page["text"]
@@ -217,6 +218,7 @@ async def test_organizer_menu_paginates_and_returns_to_same_page(
     last_buttons = _buttons(last_page)
     last_by_text = {button["text"]: button for button in last_buttons}
     assert "Страница 3/3" in last_page["text"]
+    assert last_page["text"].splitlines()[-1] == "Страница 3/3"
     assert "Мероприятие 13" in last_page["text"]
     assert last_by_text["⬅️ Назад"]["payload"] == Payload("org_menu", value="1").pack()
     assert last_by_text["➡️ Далее"]["payload"] == Payload("org_menu", value="0").pack()
@@ -456,6 +458,7 @@ async def test_catalog_book_first_page_highlights_soon_events_without_duplicates
     message = fake_bot.sent[-1]
     assert "📚 Книга мероприятий" in message["text"]
     assert "Страница 1/2" in message["text"]
+    assert message["text"].splitlines()[-1] == "Страница 1/2"
     assert "Листайте книгу кнопками ниже" in message["text"]
     assert "🔥 УЖЕ СКОРО" in message["text"]
     for day in range(1, 7):
@@ -512,6 +515,7 @@ async def test_catalog_navigation_wraps_and_keeps_image_on_later_pages(
     first_buttons = _buttons(fake_bot.sent[-1])
     first_by_text = {button["text"]: button for button in first_buttons}
     assert "Страница 1/3" in fake_bot.sent[-1]["text"]
+    assert fake_bot.sent[-1]["text"].splitlines()[-1] == "Страница 1/3"
     assert first_by_text["⬅️ Назад"]["payload"] == Payload("catalog", value="2").pack()
     assert first_by_text["➡️ Далее"]["payload"] == Payload("catalog", value="1").pack()
 
@@ -520,6 +524,7 @@ async def test_catalog_navigation_wraps_and_keeps_image_on_later_pages(
     last_page = fake_bot.sent[-1]
     last_by_text = {button["text"]: button for button in _buttons(last_page)}
     assert "Страница 3/3" in last_page["text"]
+    assert last_page["text"].splitlines()[-1] == "Страница 3/3"
     assert "Листайте книгу кнопками ниже" not in last_page["text"]
     assert "🔥 УЖЕ СКОРО" not in last_page["text"]
     assert "Событие 13" in last_page["text"]
@@ -662,6 +667,8 @@ async def test_my_registrations_hides_cancelled_record_after_rebooking_same_even
     old_registration = handlers.registration_service.create_registration(101, event.id, None)
     current_now = fixed_now + timedelta(minutes=1)
     handlers.registration_service.cancel_registration(101, old_registration.id)
+    assert storage.get_registration(old_registration.id) is None
+    assert storage.find_registration_by_code_global("OLD111") is None
     current_now = fixed_now + timedelta(minutes=2)
     handlers.registration_service.create_registration(101, event.id, None)
 
@@ -705,25 +712,21 @@ async def test_my_registrations_links_to_event_detail_and_marks_status_visually(
 
     message = fake_bot.sent[-1]
     buttons = _buttons(message)
-    assert "Статус: ✅ Записан" in message["text"]
+    assert "Статус: Записан" in message["text"]
+    assert "Статус: ✅" not in message["text"]
+    assert "Статус: ⚪" not in message["text"]
     assert "Подтверждена" not in message["text"]
-    assert "Статус: ⚪ Отменена пользователем" in message["text"]
-    assert "✅ 1 ℹ️ День открытых дверей..." in _button_texts(message)
-    assert "⚪ 2 ℹ️ Онлайн-консультация..." in _button_texts(message)
-    active_button = next(button for button in buttons if button["text"].startswith("✅ 1"))
-    canceled_button = next(button for button in buttons if button["text"].startswith("⚪ 2"))
+    assert "Отменена пользователем" not in message["text"]
+    assert "Онлайн-консультация" not in message["text"]
+    assert storage.get_registration(canceled_registration.id) is None
+    assert "ℹ️ 1. День открытых дверей..." in _button_texts(message)
+    active_button = next(button for button in buttons if button["text"].startswith("ℹ️ 1"))
     assert active_button["payload"] == Payload(
         "event_detail",
         event_id=active_event.id,
         value="0",
     ).pack()
     assert active_button["intent"] == "positive"
-    assert canceled_button["payload"] == Payload(
-        "event_detail",
-        event_id=canceled_event.id,
-        value="0",
-    ).pack()
-    assert canceled_button["intent"] == "default"
     assert not any(button["payload"].startswith("reg_cancel") for button in buttons)
 
 
@@ -762,21 +765,23 @@ async def test_my_registrations_book_paginates_six_items_in_double_buttons(
     first_page = fake_bot.sent[-1]
     assert "🎫 Книга моих записей" in first_page["text"]
     assert "Страница 1/2" in first_page["text"]
+    assert first_page["text"].splitlines()[-1] == "Страница 1/2"
+    assert _has_uploaded_image(first_page)
     for day in range(1, 7):
         assert f"Запись {day}" in first_page["text"]
     assert "Запись 7" not in first_page["text"]
     first_rows = _keyboard_rows(first_page)
     assert [button["text"] for button in first_rows[0]] == [
-        "✅ 1 ℹ️ Запись 1",
-        "✅ 2 ℹ️ Запись 2",
+        "ℹ️ 1. Запись 1",
+        "ℹ️ 2. Запись 2",
     ]
     assert [button["text"] for button in first_rows[1]] == [
-        "✅ 3 ℹ️ Запись 3",
-        "✅ 4 ℹ️ Запись 4",
+        "ℹ️ 3. Запись 3",
+        "ℹ️ 4. Запись 4",
     ]
     assert [button["text"] for button in first_rows[2]] == [
-        "✅ 5 ℹ️ Запись 5",
-        "✅ 6 ℹ️ Запись 6",
+        "ℹ️ 5. Запись 5",
+        "ℹ️ 6. Запись 6",
     ]
     first_buttons = {button["text"]: button for button in _buttons(first_page)}
     assert first_buttons["⬅️ Назад"]["payload"] == Payload("my_regs", value="1").pack()
@@ -791,10 +796,11 @@ async def test_my_registrations_book_paginates_six_items_in_double_buttons(
 
     second_page = fake_bot.sent[-1]
     assert "Страница 2/2" in second_page["text"]
+    assert second_page["text"].splitlines()[-1] == "Страница 2/2"
     assert "Запись 7" in second_page["text"]
     assert "Запись 1" not in second_page["text"]
     second_buttons = {button["text"]: button for button in _buttons(second_page)}
-    assert second_buttons["✅ 7 ℹ️ Запись 7"]["payload"] == Payload(
+    assert second_buttons["ℹ️ 7. Запись 7"]["payload"] == Payload(
         "event_detail",
         event_id=events[6].id,
         value="1",
@@ -851,8 +857,8 @@ async def test_my_registrations_sort_by_event_date_closeness(
     assert message["text"].index("1. Вчерашнее посещение") < message["text"].index(
         "2. Через три дня"
     )
-    assert "Статус: ✅ Пришёл" in message["text"]
-    assert "Статус: ✅ Записан" in message["text"]
+    assert "Статус: Пришёл" in message["text"]
+    assert "Статус: Записан" in message["text"]
 
 
 async def test_recent_attended_registration_stays_visible_with_readonly_detail(
@@ -1076,7 +1082,7 @@ async def test_event_detail_cancel_requires_explicit_confirmation(
     )
 
     assert "Запись отменена." in fake_bot.sent[-1]["text"]
-    assert storage.get_registration(registration.id).status.value == "canceled_by_user"
+    assert storage.get_registration(registration.id) is None
 
 
 async def test_event_detail_uses_direct_active_registration_lookup(

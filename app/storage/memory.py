@@ -484,7 +484,10 @@ class MemoryStorage:
             self._remove_active_registration(registration)
             self._decrease_booked_count(registration)
             self._audit(user_id, "registration.cancelled", "registration", str(registration.id), now=now)
-            return self._attach_registration(registration)
+            attached = self._attach_registration(registration)
+            if registration.status == RegistrationStatus.CANCELED_BY_USER:
+                self._delete_registration_cascade(registration)
+            return attached
 
     def set_notifications_enabled(
         self,
@@ -539,6 +542,17 @@ class MemoryStorage:
         if registration is None or registration.status not in ACTIVE_REGISTRATION_STATUSES:
             return None
         return self._registration_without_related_objects(registration)
+
+    def delete_user_canceled_registrations(self) -> int:
+        with self._lock:
+            registrations = [
+                registration
+                for registration in self.registrations.values()
+                if registration.status == RegistrationStatus.CANCELED_BY_USER
+            ]
+            for registration in registrations:
+                self._delete_registration_cascade(registration)
+            return len(registrations)
 
     def ensure_role(
         self,
@@ -1241,6 +1255,20 @@ class MemoryStorage:
         event.image_token = image[0]
         event.image_url = image[1]
         return event
+
+    def _delete_registration_cascade(self, registration: Registration) -> None:
+        self.registrations.pop(registration.id, None)
+        self.registration_codes.pop(registration.code, None)
+        self.active_registration_keys.pop(
+            self._active_key(registration.user_id, registration.event_id),
+            None,
+        )
+        for notification_id, notification in list(self.notifications.items()):
+            if notification.registration_id == registration.id:
+                self.notifications.pop(notification_id, None)
+        for audit_id, audit in list(self.audit_log.items()):
+            if audit.entity_type == "registration" and audit.entity_id == str(registration.id):
+                self.audit_log.pop(audit_id, None)
 
     def _delete_event_cascade(self, event_id: int) -> None:
         registration_ids = {

@@ -12,6 +12,7 @@ from app.domain import (
     DuplicateActiveRegistrationError,
     LateCancellationDeniedError,
     NoSeatsAvailableError,
+    RegistrationNotFoundError,
     SlotNotFoundError,
 )
 from app.enums import LateCancelPolicy, NotificationKind, OutboxStatus, RegistrationStatus
@@ -117,10 +118,12 @@ def test_cancel_before_start_returns_seat_to_pool(storage, fixed_now):
         service.record_profile_consent(user_id, "hackathon-2026-05")
 
     first = service.create_registration(101, event.id, None)
-    service.cancel_registration(101, first.id)
+    canceled = service.cancel_registration(101, first.id)
     second = service.create_registration(102, event.id, None)
 
-    assert first.status == RegistrationStatus.CANCELED_BY_USER
+    assert canceled.status == RegistrationStatus.CANCELED_BY_USER
+    assert storage.get_registration(first.id) is None
+    assert storage.find_registration_by_code_global("AAA111") is None
     assert second.code == "BBB222"
     assert service.available_places(event.id, None) == 0
 
@@ -137,10 +140,49 @@ def test_repeated_cancellation_does_not_increase_available_places(storage, fixed
     registration = service.create_registration(101, event.id, None)
 
     service.cancel_registration(101, registration.id)
-    service.cancel_registration(101, registration.id)
+    with pytest.raises(RegistrationNotFoundError):
+        service.cancel_registration(101, registration.id)
 
     assert service.available_places(event.id, None) == 1
     assert storage.get_event(event.id).booked_count == 0
+
+
+def test_storage_deletes_existing_user_canceled_registrations(storage, fixed_now):
+    event = create_event(storage, fixed_now)
+    service = RegistrationService(
+        storage,
+        now=lambda: fixed_now,
+        code_generator=lambda: "DEL111",
+    )
+    service.upsert_user(101, "Анна")
+    service.record_profile_consent(101, "hackathon-2026-05")
+    registration = service.create_registration(101, event.id, None)
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    storage.change_status(
+        501,
+        registration.id,
+        RegistrationStatus.CANCELED_BY_USER,
+        now=fixed_now,
+    )
+    storage.add_notification(
+        NotificationOutbox(
+            id=0,
+            event_id=event.id,
+            registration_id=registration.id,
+            user_id=101,
+            kind=NotificationKind.REMINDER_24H,
+            message_text="Напоминание",
+            send_after=fixed_now,
+        )
+    )
+
+    removed = storage.delete_user_canceled_registrations()
+
+    assert removed == 1
+    assert storage.get_registration(registration.id) is None
+    assert storage.find_registration_by_code_global("DEL111") is None
+    assert storage.list_notifications() == []
 
 
 def test_available_places_for_event_uses_event_counter_without_storage(storage, fixed_now):

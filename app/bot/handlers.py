@@ -911,8 +911,9 @@ class BotHandlers:
                 chat_id=chat_id,
                 text=(
                     "👥 Список Организаторов\n"
-                    "Страница 1/1\n\n"
-                    "Пока Организаторов нет."
+                    "\n"
+                    "Пока Организаторов нет.\n\n"
+                    "Страница 1/1"
                 ),
                 attachments=[
                     image_attachment(BotImageAsset.ORGANIZER_MENU),
@@ -931,7 +932,6 @@ class BotHandlers:
         ]
         lines = [
             "👥 Список Организаторов",
-            f"Страница {page + 1}/{total_pages}",
             "",
             "Листайте список кнопками ниже и открывайте нужного Организатора.",
         ]
@@ -960,6 +960,7 @@ class BotHandlers:
                 current_row = []
         if current_row:
             rows.append(current_row)
+        self._append_page_footer(lines, page, total_pages)
 
         previous_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
@@ -1100,9 +1101,9 @@ class BotHandlers:
                 chat_id=chat_id,
                 text=(
                     "📚 Книга мероприятий\n"
-                    "Страница 1/1\n\n"
                     "Пока в книге нет ближайших мероприятий. Загляните позже: "
-                    "как только появятся новые мероприятия, они будут здесь."
+                    "как только появятся новые мероприятия, они будут здесь.\n\n"
+                    "Страница 1/1"
                 ),
                 attachments=[
                     image_attachment(BotImageAsset.MAIN_MENU),
@@ -1115,7 +1116,7 @@ class BotHandlers:
         page_events = events[
             page * CATALOG_PAGE_SIZE : (page + 1) * CATALOG_PAGE_SIZE
         ]
-        lines = ["📚 Книга мероприятий", f"Страница {page + 1}/{total_pages}"]
+        lines = ["📚 Книга мероприятий"]
         rows: list[list[dict]] = []
         current_detail_row: list[dict] = []
 
@@ -1164,6 +1165,7 @@ class BotHandlers:
 
         if current_detail_row:
             rows.append(current_detail_row)
+        self._append_page_footer(lines, page, total_pages)
 
         previous_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
@@ -1413,12 +1415,15 @@ class BotHandlers:
                 user_id=user_id,
                 chat_id=chat_id,
                 text="🎫 У вас пока нет записей.",
-                attachments=inline_keyboard(
-                    [
-                        [callback_button("📚 Каталог", Payload("catalog"))],
-                        [self._main_menu_button()],
-                    ]
-                ),
+                attachments=[
+                    image_attachment(BotImageAsset.MAIN_MENU),
+                    *inline_keyboard(
+                        [
+                            [callback_button("📚 Каталог", Payload("catalog"))],
+                            [self._main_menu_button()],
+                        ]
+                    ),
+                ],
             )
             return
         total_pages = max(ceil(len(registrations) / MY_REGISTRATIONS_BOOK_PAGE_SIZE), 1)
@@ -1431,7 +1436,6 @@ class BotHandlers:
         ]
         lines = [
             "🎫 Книга моих записей",
-            f"Страница {page + 1}/{total_pages}",
             "",
             "Листайте книгу кнопками ниже и открывайте нужную запись.",
         ]
@@ -1453,11 +1457,10 @@ class BotHandlers:
                 f"{closed_registration_text}"
             )
             is_active = registration.status in ACTIVE_REGISTRATION_STATUSES
-            prefix = "✅" if is_active else "⚪"
             intent = "positive" if is_active else "default"
             current_detail_row.append(
                 callback_button(
-                    f"{prefix} {index} ℹ️ {self._short_button_title(registration.event.title)}",
+                    f"ℹ️ {index}. {self._short_button_title(registration.event.title)}",
                     Payload(
                         "event_detail",
                         event_id=registration.event_id,
@@ -1471,6 +1474,7 @@ class BotHandlers:
                 current_detail_row = []
         if current_detail_row:
             rows.append(current_detail_row)
+        self._append_page_footer(lines, page, total_pages)
 
         previous_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
@@ -1492,7 +1496,10 @@ class BotHandlers:
             user_id=user_id,
             chat_id=chat_id,
             text="\n".join(lines),
-            attachments=inline_keyboard(rows),
+            attachments=[
+                image_attachment(BotImageAsset.MAIN_MENU),
+                *inline_keyboard(rows),
+            ],
         )
 
     def _visible_user_registrations(self, user_id: int) -> list[Registration]:
@@ -1614,9 +1621,9 @@ class BotHandlers:
         if not book_events:
             text = (
                 "📚 Книга мероприятий Организатора\n"
-                "Страница 1/1\n\n"
                 "✨ Пока в книге Организатора нет мероприятий. "
-                "Создайте первое — оно появится здесь сразу после заполнения."
+                "Создайте первое — оно появится здесь сразу после заполнения.\n\n"
+                "Страница 1/1"
             )
             rows.append(
                 [callback_button(CREATE_EVENT_BUTTON_TEXT, Payload("org_create"))]
@@ -1641,7 +1648,6 @@ class BotHandlers:
         ]
         lines = [
             "📚 Книга мероприятий Организатора",
-            f"Страница {page + 1}/{total_pages}",
             "",
             "Листайте книгу кнопками ниже и открывайте нужное мероприятие. 🗂️",
         ]
@@ -1682,6 +1688,7 @@ class BotHandlers:
 
         if current_button_row:
             rows.append(current_button_row)
+        self._append_page_footer(lines, page, total_pages)
 
         previous_page = (page - 1) % total_pages
         next_page = (page + 1) % total_pages
@@ -1837,7 +1844,6 @@ class BotHandlers:
         ]
         lines = [
             "👥 Участники мероприятия",
-            f"Страница {page + 1}/{total_pages}",
             "",
             f"Мероприятие: {self._markdown_text(event.title)}",
             (
@@ -1856,6 +1862,7 @@ class BotHandlers:
                 )
         else:
             lines.append("\nПока по этому мероприятию нет записей.")
+        self._append_page_footer(lines, page, total_pages)
 
         rows: list[list[dict]] = []
         current_row: list[dict] = []
@@ -3183,6 +3190,12 @@ class BotHandlers:
         return "онлайн" if event.format.value == "online" else "очно"
 
     @staticmethod
+    def _append_page_footer(lines: list[str], page: int, total_pages: int) -> None:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append(f"Страница {page + 1}/{total_pages}")
+
+    @staticmethod
     def _format_status(status: RegistrationStatus) -> str:
         mapping = {
             RegistrationStatus.CONFIRMED: "Записан",
@@ -3280,8 +3293,7 @@ class BotHandlers:
 
     @classmethod
     def _format_status_for_user(cls, status: RegistrationStatus) -> str:
-        icon = "✅" if status in ACTIVE_REGISTRATION_STATUSES else "⚪"
-        return f"{icon} {cls._format_status(status)}"
+        return cls._format_status(status)
 
     @staticmethod
     def _short_button_title(title: str, *, max_chars: int = 22) -> str:

@@ -174,6 +174,7 @@ async def test_admin_organizer_book_paginates_and_detail_can_remove(
     first_page = fake_bot.sent[-1]
     assert "👥 Список Организаторов" in first_page["text"]
     assert "Страница 1/2" in first_page["text"]
+    assert first_page["text"].splitlines()[-1] == "Страница 1/2"
     assert "8. [Организатор 08](max://user/708)" in first_page["text"]
     assert "9. [Организатор 09](max://user/709)" not in first_page["text"]
     assert [len(row) for row in _keyboard_rows(first_page)[:4]] == [2, 2, 2, 2]

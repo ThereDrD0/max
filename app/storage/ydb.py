@@ -686,16 +686,28 @@ class YdbStorage:
                     if event.late_cancel_policy == LateCancelPolicy.DENY:
                         raise LateCancellationDeniedError("После начала мероприятия отмена недоступна")
                     status = RegistrationStatus.LATE_CANCELED
+                    self._tx_update_registration_status(tx, registration, status, current, canceled_at=current)
+                    self._tx_remove_active_registration(tx, registration)
+                    self._tx_decrease_booked_count(tx, registration)
+                    self._tx_audit(tx, user_id, "registration.cancelled", "registration", str(registration.id), now=current)
+                    self._tx_execute(tx, "SELECT 1;", commit=True)
+                    return registration.id
                 else:
                     status = RegistrationStatus.CANCELED_BY_USER
-                self._tx_update_registration_status(tx, registration, status, current, canceled_at=current)
+                    registration.status = status
+                    registration.canceled_at = current
+                    registration.updated_at = current
+                registration.event = event
                 self._tx_remove_active_registration(tx, registration)
                 self._tx_decrease_booked_count(tx, registration)
                 self._tx_audit(tx, user_id, "registration.cancelled", "registration", str(registration.id), now=current)
+                self._tx_delete_registration_cascade(tx, registration)
                 self._tx_execute(tx, "SELECT 1;", commit=True)
-                return registration.id
+                return registration
 
         result_id = self.pool.retry_operation_sync(callee, retry_settings=ydb.RetrySettings(max_retries=10))
+        if isinstance(result_id, Registration):
+            return self._attach_registration(result_id)
         registration = self.get_registration(result_id)
         if registration is None:  # pragma: no cover - defensive edge
             raise RegistrationNotFoundError("Запись не найдена")
@@ -787,6 +799,27 @@ class YdbStorage:
         if registration is None or registration.status not in ACTIVE_REGISTRATION_STATUSES:
             return None
         return registration
+
+    def delete_user_canceled_registrations(self) -> int:
+        rows = self._query(
+            """
+            DECLARE $status AS Utf8;
+            SELECT id, code, user_id, event_id FROM registrations
+            WHERE status = $status;
+            """,
+            {"$status": _utf8(RegistrationStatus.CANCELED_BY_USER.value)},
+        )
+        for row in rows:
+            registration = Registration(
+                id=int(row["id"]),
+                code=str(row["code"]),
+                user_id=int(row["user_id"]),
+                event_id=int(row["event_id"]),
+                slot_id=None,
+                status=RegistrationStatus.CANCELED_BY_USER,
+            )
+            self._delete_registration_cascade(registration)
+        return len(rows)
 
     def ensure_role(
         self,
@@ -1758,6 +1791,48 @@ class YdbStorage:
             if item.registration_id is not None:
                 item.registration = registrations_by_id.get(item.registration_id)
 
+    def _delete_registration_cascade(self, registration: Registration) -> None:
+        self._execute(
+            """
+            DECLARE $registration_id AS Int64;
+            DELETE FROM notification_outbox WHERE registration_id = $registration_id;
+            """,
+            {"$registration_id": _int(registration.id)},
+        )
+        self._execute(
+            """
+            DECLARE $code AS Utf8;
+            DELETE FROM registration_codes WHERE code = $code;
+            """,
+            {"$code": _utf8(registration.code)},
+        )
+        self._execute(
+            """
+            DECLARE $active_key AS Utf8;
+            DELETE FROM active_registration_keys WHERE active_key = $active_key;
+            """,
+            {"$active_key": _utf8(self._active_key(registration.user_id, registration.event_id))},
+        )
+        self._execute(
+            """
+            DECLARE $entity_type AS Utf8;
+            DECLARE $entity_id AS Utf8;
+            DELETE FROM audit_log
+            WHERE entity_type = $entity_type AND entity_id = $entity_id;
+            """,
+            {
+                "$entity_type": _utf8("registration"),
+                "$entity_id": _utf8(str(registration.id)),
+            },
+        )
+        self._execute(
+            """
+            DECLARE $id AS Int64;
+            DELETE FROM registrations WHERE id = $id;
+            """,
+            {"$id": _int(registration.id)},
+        )
+
     def _delete_event_cascade(self, event_id: int) -> None:
         registration_rows = self._query(
             """
@@ -2270,7 +2345,54 @@ class YdbStorage:
                 "$user_id": _int(user_id),
                 "$message_text": _utf8(message_text),
                 "$send_after": _timestamp(send_after),
+                },
+            )
+
+    def _tx_delete_registration_cascade(self, tx, registration: Registration) -> None:
+        self._tx_execute(
+            tx,
+            """
+            DECLARE $registration_id AS Int64;
+            DELETE FROM notification_outbox WHERE registration_id = $registration_id;
+            """,
+            {"$registration_id": _int(registration.id)},
+        )
+        self._tx_execute(
+            tx,
+            """
+            DECLARE $code AS Utf8;
+            DELETE FROM registration_codes WHERE code = $code;
+            """,
+            {"$code": _utf8(registration.code)},
+        )
+        self._tx_execute(
+            tx,
+            """
+            DECLARE $active_key AS Utf8;
+            DELETE FROM active_registration_keys WHERE active_key = $active_key;
+            """,
+            {"$active_key": _utf8(self._active_key(registration.user_id, registration.event_id))},
+        )
+        self._tx_execute(
+            tx,
+            """
+            DECLARE $entity_type AS Utf8;
+            DECLARE $entity_id AS Utf8;
+            DELETE FROM audit_log
+            WHERE entity_type = $entity_type AND entity_id = $entity_id;
+            """,
+            {
+                "$entity_type": _utf8("registration"),
+                "$entity_id": _utf8(str(registration.id)),
             },
+        )
+        self._tx_execute(
+            tx,
+            """
+            DECLARE $id AS Int64;
+            DELETE FROM registrations WHERE id = $id;
+            """,
+            {"$id": _int(registration.id)},
         )
 
     def _update_notification_status(

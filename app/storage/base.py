@@ -191,6 +191,8 @@ class Storage(Protocol):
         event_id: int,
     ) -> Registration | None: ...
 
+    def delete_user_canceled_registrations(self) -> int: ...
+
     def ensure_role(
         self,
         user_id: int,
