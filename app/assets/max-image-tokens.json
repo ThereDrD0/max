@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-05-25T01:23:42.879334+00:00",
+  "assets": {
+    "main_menu": {
+      "path": "app/assets/main-menu.png",
+      "token": "SRA7i+UOlA9wpd3DHUj6yXxazLri2G/9JAaUdc0V4APUfH5HvqIIKxWnGzf2aCO5W4B6UWOVDiOsvi5QO8Onv1tKoiR/ATSHoDd0+vBRbNr0UWXW5IEXO7Y3XBp359GB/hPEibxhAnYph8eOelrChAfQWqsqX0RUfrKlZnTHFaMCFYwJgbYqK1BABZIE1GEa"
+    },
+    "organizer_menu": {
+      "path": "app/assets/organizer-menu.png",
+      "token": "edW/tcKr0Nl4f2n5f2x26QQyOFUEKfLDA+iPGEUkrfFkaymbtVUzQABj/KAkyt8vhAsohLw4HmXRnomZ6p+X3bcBGi48l4vbw2jiSddt3WYiFjXmXswuKsV7fdeyNI1EYT9o56bNlsiwqaT44lHMLQsJpzvuQhhi6a3MhgryG8H6L6enwBP1H+nSCB580AFIP84jtobHpfA="
+    },
+    "participants_menu": {
+      "path": "app/assets/participants-menu.png",
+      "token": "86zWRVVoU6Lf4Ih2I8biufzwWDW/TZbDydkP3dWTZ3SeiNHXWS/qbI/TZHT9rahQUWROJZ0dmO4PIwxHCXak/ow6Z0QUjSf8Aw75SnpicVNcv0QXj/+sqB4SvTjLlCSvQM0oMoTZCbb794dyivpJozrBo7I8vu2CzHWmI6CjJNhKj92JT4fizWVfIJoO37wPAxMQLXP5Hbk="
+    },
+    "notification_reminder": {
+      "path": "app/assets/notification-reminder.png",
+      "token": "IZ9hTQaRuycnPkNqaaDSOJ6OPoa2DHX8iQGpWK0oUKQSpQ4wjlqfvjZ57adFY2q+JYKv0nQ3KL7CqhRqf8qJMKdd7I/y7XQjSHNEKbY4gbRbghLjRgRQldMQgNPnBfj4ZvHM8EWaQBo7/Jy5peOqGu82j6d/DxrYPcWiJ3WqDxIXk+yihOrTttZsre23+9mVysv99Y/lBcjBBzp0xF6+RQ=="
+    }
+  }
+}

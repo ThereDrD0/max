@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
 
-from app.bot.client import local_image_attachment
+from app.bot.assets import BotImageAsset, image_attachment
 from app.bot.deeplinks import (
     EVENT_PAYLOAD_PREFIX,
     MAX_START_PAYLOAD_LIMIT,
@@ -19,11 +18,6 @@ from app.enums import ACTIVE_REGISTRATION_STATUSES, OutboxStatus
 from app.services.reminders import render_automatic_reminder
 from app.storage.base import Storage
 from app.storage.entities import Event, NotificationOutbox
-
-
-NOTIFICATION_REMINDER_IMAGE_PATH = (
-    Path(__file__).resolve().parents[1] / "assets" / "notification-reminder.png"
-)
 
 
 class NotificationWorker:
@@ -95,7 +89,7 @@ class NotificationWorker:
             return None
         rows = [[await self._event_detail_button(event)]]
         return [
-            local_image_attachment(NOTIFICATION_REMINDER_IMAGE_PATH),
+            image_attachment(BotImageAsset.NOTIFICATION_REMINDER),
             *inline_keyboard(rows),
         ]
 

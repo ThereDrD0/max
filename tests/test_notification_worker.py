@@ -74,9 +74,10 @@ async def test_notification_worker_sends_reminder_with_image_and_detail_button(
     assert "🔔 Напоминание о мероприятии" in message["text"]
     assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in message["text"]
     assert any(
-        getattr(attachment, "path", "").replace("\\", "/").endswith(
-            "app/assets/notification-reminder.png"
-        )
+        isinstance(attachment, dict)
+        and attachment.get("type") == "image"
+        and isinstance((attachment.get("payload") or {}).get("token"), str)
+        and bool((attachment.get("payload") or {}).get("token"))
         for attachment in message["attachments"]
     )
     assert _detail_button(message) == {

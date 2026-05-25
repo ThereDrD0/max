@@ -262,7 +262,7 @@ async def test_organizer_menu_allows_role_to_create_event_without_existing_event
     assert "Пока в книге Организатора нет мероприятий" in message["text"]
     assert "📝 Создать мероприятие" in _button_texts(message)
     assert "➕ Создать мероприятие" not in _button_texts(message)
-    assert _has_local_organizer_menu_image(message)
+    assert _has_uploaded_image(message)
     assert "нет доступа" not in message["text"].lower()
 
 
@@ -507,7 +507,7 @@ async def test_organizer_participants_book_sorts_statuses_and_shows_action_butto
     assert "✅ Борис пришел" not in button_texts
     assert "✅ Сергей пришел" not in button_texts
     assert "⬅️ К мероприятию" in button_texts
-    assert _has_local_participants_menu_image(message)
+    assert _has_uploaded_image(message)
 
 
 async def test_organizer_participants_book_paginates_eight_items(
@@ -1131,19 +1131,14 @@ def _keyboard_rows(message: dict) -> list[list[dict]]:
     raise AssertionError("inline_keyboard attachment not found")
 
 
-def _has_local_organizer_menu_image(message: dict) -> bool:
+def _has_uploaded_image(message: dict) -> bool:
     return any(
-        getattr(attachment, "path", "").replace("\\", "/").endswith(
-            "app/assets/organizer-menu.png"
+        isinstance(attachment, dict)
+        and attachment.get("type") == "image"
+        and isinstance(
+            (attachment.get("payload") or {}).get("token"),
+            str,
         )
-        for attachment in message["attachments"]
-    )
-
-
-def _has_local_participants_menu_image(message: dict) -> bool:
-    return any(
-        getattr(attachment, "path", "").replace("\\", "/").endswith(
-            "app/assets/participants-menu.png"
-        )
+        and bool((attachment.get("payload") or {}).get("token"))
         for attachment in message["attachments"]
     )

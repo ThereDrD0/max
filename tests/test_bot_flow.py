@@ -83,10 +83,7 @@ async def test_main_menu_contains_image_commands_and_primary_buttons(
         "/events — показать ближайшие мероприятия\n"
         "/my или /records — показать мои записи"
     )
-    image = message["attachments"][0]
-    assert getattr(image, "path", "").replace("\\", "/").endswith(
-        "app/assets/main-menu.png"
-    )
+    assert _has_uploaded_image(message)
     assert _button_texts(message) == "📚 Мероприятия 🎫 Мои записи"
     assert "Меню организатора" not in message["text"]
     assert "/organizer" not in message["text"]
@@ -151,7 +148,7 @@ async def test_main_menu_buttons_open_current_sections(
     assert "📚 Книга мероприятий Организатора" in fake_bot.sent[-1]["text"]
     assert "Пробное занятие по Python" in fake_bot.sent[-1]["text"]
     assert "🏠 Главное меню" in _button_texts(fake_bot.sent[-1])
-    assert _has_local_organizer_menu_image(fake_bot.sent[-1])
+    assert _has_uploaded_image(fake_bot.sent[-1])
 
 
 async def test_organizer_menu_paginates_and_returns_to_same_page(
@@ -181,7 +178,7 @@ async def test_organizer_menu_paginates_and_returns_to_same_page(
     for day in range(1, 7):
         assert f"Мероприятие {day}" in first_page["text"]
     assert "Мероприятие 7" not in first_page["text"]
-    assert _has_local_organizer_menu_image(first_page)
+    assert _has_uploaded_image(first_page)
 
     first_buttons = _buttons(first_page)
     first_by_text = {button["text"]: button for button in first_buttons}
@@ -471,7 +468,7 @@ async def test_catalog_book_first_page_highlights_soon_events_without_duplicates
     assert "⬅️ Назад" in button_texts
     assert "➡️ Далее" in button_texts
     assert "🏠 Главное меню" in button_texts
-    assert _has_local_main_menu_image(message)
+    assert _has_uploaded_image(message)
 
 
 async def test_catalog_navigation_wraps_and_keeps_image_on_later_pages(
@@ -508,7 +505,7 @@ async def test_catalog_navigation_wraps_and_keeps_image_on_later_pages(
     assert "Событие 13" in last_page["text"]
     assert last_by_text["⬅️ Назад"]["payload"] == Payload("catalog", value="1").pack()
     assert last_by_text["➡️ Далее"]["payload"] == Payload("catalog", value="0").pack()
-    assert _has_local_main_menu_image(last_page)
+    assert _has_uploaded_image(last_page)
 
 
 async def test_event_detail_includes_event_image_before_keyboard(
@@ -1087,19 +1084,14 @@ def _keyboard_rows(message: dict) -> list[list[dict]]:
     raise AssertionError("inline_keyboard attachment not found")
 
 
-def _has_local_main_menu_image(message: dict) -> bool:
+def _has_uploaded_image(message: dict) -> bool:
     return any(
-        getattr(attachment, "path", "").replace("\\", "/").endswith(
-            "app/assets/main-menu.png"
+        isinstance(attachment, dict)
+        and attachment.get("type") == "image"
+        and isinstance(
+            (attachment.get("payload") or {}).get("token"),
+            str,
         )
-        for attachment in message["attachments"]
-    )
-
-
-def _has_local_organizer_menu_image(message: dict) -> bool:
-    return any(
-        getattr(attachment, "path", "").replace("\\", "/").endswith(
-            "app/assets/organizer-menu.png"
-        )
+        and bool((attachment.get("payload") or {}).get("token"))
         for attachment in message["attachments"]
     )

@@ -4,11 +4,11 @@ import asyncio
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from math import ceil
-from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
 
-from app.bot.client import BotClient, local_image_attachment
+from app.bot.assets import BotImageAsset, image_attachment
+from app.bot.client import BotClient
 from app.bot.deeplinks import (
     MAX_START_PAYLOAD_LIMIT,
     EVENT_PAYLOAD_PREFIX,
@@ -93,13 +93,6 @@ PARTICIPANTS_BOOK_PAGE_SIZE = 8
 ORGANIZER_BOOK_BUTTON_TITLE_MAX_CHARS = 30
 PARTICIPANT_BUTTON_NAME_MAX_CHARS = 24
 CATALOG_SOON_COUNT = 3
-MAIN_MENU_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "main-menu.png"
-ORGANIZER_MENU_IMAGE_PATH = (
-    Path(__file__).resolve().parents[1] / "assets" / "organizer-menu.png"
-)
-PARTICIPANTS_MENU_IMAGE_PATH = (
-    Path(__file__).resolve().parents[1] / "assets" / "participants-menu.png"
-)
 _SEND_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 _SEND_LOCKS_GUARD = Lock()
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -621,7 +614,7 @@ class BotHandlers:
             chat_id=chat_id,
             text=self._main_menu_text(user_id),
             attachments=[
-                local_image_attachment(MAIN_MENU_IMAGE_PATH),
+                image_attachment(BotImageAsset.MAIN_MENU),
                 *inline_keyboard(rows),
             ],
         )
@@ -666,7 +659,7 @@ class BotHandlers:
                     "как только появятся новые мероприятия, они будут здесь."
                 ),
                 attachments=[
-                    local_image_attachment(MAIN_MENU_IMAGE_PATH),
+                    image_attachment(BotImageAsset.MAIN_MENU),
                     *inline_keyboard([[self._main_menu_button()]]),
                 ],
             )
@@ -740,7 +733,7 @@ class BotHandlers:
             chat_id=chat_id,
             text="\n".join(lines),
             attachments=[
-                local_image_attachment(MAIN_MENU_IMAGE_PATH),
+                image_attachment(BotImageAsset.MAIN_MENU),
                 *inline_keyboard(rows),
             ],
         )
@@ -1113,7 +1106,7 @@ class BotHandlers:
                 chat_id=chat_id,
                 text=text,
                 attachments=[
-                    local_image_attachment(ORGANIZER_MENU_IMAGE_PATH),
+                    image_attachment(BotImageAsset.ORGANIZER_MENU),
                     *inline_keyboard(rows),
                 ],
             )
@@ -1192,7 +1185,7 @@ class BotHandlers:
             chat_id=chat_id,
             text="\n".join(lines),
             attachments=[
-                local_image_attachment(ORGANIZER_MENU_IMAGE_PATH),
+                image_attachment(BotImageAsset.ORGANIZER_MENU),
                 *inline_keyboard(rows),
             ],
         )
@@ -1417,7 +1410,7 @@ class BotHandlers:
             chat_id=chat_id,
             text="\n".join(lines),
             attachments=[
-                local_image_attachment(PARTICIPANTS_MENU_IMAGE_PATH),
+                image_attachment(BotImageAsset.PARTICIPANTS_MENU),
                 *inline_keyboard(rows),
             ],
             format="markdown",
