@@ -149,14 +149,21 @@ class YdbStorage:
                 user_id, display_name, is_bot, created_at, updated_at
             )
             SELECT
-                $user_id,
-                CASE
-                    WHEN $display_name != "" THEN $display_name
-                    ELSE $default_display_name
-                END,
-                $is_bot,
-                $updated_at,
-                $updated_at
+                new_user.user_id AS user_id,
+                new_user.display_name AS display_name,
+                new_user.is_bot AS is_bot,
+                new_user.updated_at AS created_at,
+                new_user.updated_at AS updated_at
+            FROM (
+                SELECT
+                    $user_id AS user_id,
+                    CASE
+                        WHEN $display_name != "" THEN $display_name
+                        ELSE $default_display_name
+                    END AS display_name,
+                    $is_bot AS is_bot,
+                    $updated_at AS updated_at
+            ) AS new_user
             WHERE NOT EXISTS (
                 SELECT user_id FROM users WHERE user_id = $user_id
             );

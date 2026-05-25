@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from app.services.registration import RegistrationService
 from app.storage.entities import OrganizerState
+from app.storage.ydb import YdbStorage
 from tests.conftest import create_event
 
 
@@ -29,6 +30,23 @@ def test_touch_user_creates_updates_and_keeps_name_for_empty_touch(storage, fixe
     unchanged = storage.get_user(101)
     assert unchanged is not None
     assert unchanged.display_name == "Анна Новая"
+
+
+def test_ydb_touch_user_uses_supported_conditional_insert_shape(fixed_now, monkeypatch):
+    storage = object.__new__(YdbStorage)
+    calls = []
+
+    monkeypatch.setattr(storage, "_execute", lambda query, params: calls.append((query, params)))
+
+    storage.touch_user(101, "Анна", now=fixed_now)
+
+    assert len(calls) == 1
+    query, _ = calls[0]
+    insert_part = query.split("INSERT INTO users", 1)[1]
+    assert "WHERE NOT EXISTS" in insert_part
+    assert "FROM (" in insert_part
+    assert "new_user.updated_at AS created_at" in insert_part
+    assert "new_user.updated_at AS updated_at" in insert_part
 
 
 def test_get_user_roles_returns_all_roles(storage):
