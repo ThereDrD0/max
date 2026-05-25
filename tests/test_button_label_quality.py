@@ -25,7 +25,7 @@ EMOJI_RE = re.compile(
     "\u2B00-\u2BFF"
     "]|\ufe0f"
 )
-COMPACT_NUMBERED_BUTTON_RE = re.compile(r"^\{\}\. \{text\}$")
+DYNAMIC_NUMBERED_BUTTON_RE = re.compile(r"^\S+ \{\}\. \{text\}$")
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,6 @@ def test_all_bot_buttons_have_emoji() -> None:
         f"{label.source}: {label.text!r}"
         for label in labels
         if not _emoji_prefix(label.text)
-        and not _is_compact_numbered_button(label.text)
     ]
 
     assert missing == []
@@ -60,7 +59,6 @@ def test_all_bot_buttons_start_with_emoji() -> None:
         f"{label.source}: {label.text!r}"
         for label in labels
         if not _starts_with_emoji(label.text)
-        and not _is_compact_numbered_button(label.text)
     ]
 
     assert wrong_order == []
@@ -69,7 +67,7 @@ def test_all_bot_buttons_start_with_emoji() -> None:
 def test_same_button_text_uses_same_emoji() -> None:
     labels_by_text: dict[str, set[str]] = defaultdict(set)
     for label in _collect_button_labels():
-        if _is_compact_numbered_button(label.text):
+        if _is_dynamic_numbered_button(label.text):
             continue
         normalized_text = _text_without_emoji(label.text)
         if not normalized_text:
@@ -372,8 +370,8 @@ def _text_without_emoji(text: str) -> str:
     return " ".join(value.split())
 
 
-def _is_compact_numbered_button(text: str) -> bool:
-    return bool(COMPACT_NUMBERED_BUTTON_RE.match(text))
+def _is_dynamic_numbered_button(text: str) -> bool:
+    return bool(DYNAMIC_NUMBERED_BUTTON_RE.match(text))
 
 
 def _looks_like_ui_text(text: str) -> bool:

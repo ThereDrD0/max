@@ -687,7 +687,7 @@ class BotHandlers:
             )
             current_detail_row.append(
                 callback_button(
-                    f"{offset}. {self._short_button_title(event.title)}",
+                    f"ℹ️ {offset}. {self._short_button_title(event.title)}",
                     Payload("event_detail", event_id=event.id, value=str(page)),
                 )
             )
