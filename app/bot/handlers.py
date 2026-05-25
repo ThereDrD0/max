@@ -96,6 +96,7 @@ REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT = (
 )
 
 CATALOG_PAGE_SIZE = 6
+MY_REGISTRATIONS_BOOK_PAGE_SIZE = 6
 ORGANIZER_BOOK_PAGE_SIZE = 6
 ADMIN_ORGANIZER_BOOK_PAGE_SIZE = 8
 PARTICIPANTS_BOOK_PAGE_SIZE = 8
@@ -312,7 +313,11 @@ class BotHandlers:
             )
             await self._send_registration_success(user_id, chat_id, registration)
         elif data.action == "my_regs":
-            await self._send_my_registrations(user_id, chat_id)
+            await self._send_my_registrations(
+                user_id,
+                chat_id,
+                page=self._payload_page(data),
+            )
         elif data.action in {"reg_cancel", "reg_cancel_confirm"} and data.registration_id is not None:
             await self._send_cancel_confirmation(user_id, chat_id, data.registration_id)
         elif data.action == "reg_cancel_apply" and data.registration_id is not None:
@@ -1190,12 +1195,18 @@ class BotHandlers:
         event = self.storage.get_event(event_id)
         if event is None:
             raise RegistrationClosedError("Мероприятие недоступно")
-        if not self._event_visible_to_users(event):
+        active_registration = self._active_registration_for_event(user_id, event.id)
+        event_is_future = self._event_visible_to_users(event)
+        has_recent_attended_record = (
+            active_registration is not None
+            and active_registration.status == RegistrationStatus.ATTENDED
+            and self._recent_attended_event_visible(event)
+        )
+        if not event_is_future and not has_recent_attended_record:
             await self._send_event_unavailable_for_user(user_id, chat_id)
             return
         free = self.registration_service.available_places_for_event(event)
         dev_line = f"\n[DEV] event_id={event.id}" if self.dev_mode else ""
-        active_registration = self._active_registration_for_event(user_id, event.id)
         rows: list[list[dict]] = []
         status_lines: list[str] = []
         if active_registration is not None:
@@ -1207,6 +1218,8 @@ class BotHandlers:
             )
             if event.registration_closed:
                 status_lines.append(REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT)
+            if not event_is_future:
+                status_lines.append("Мероприятие уже завершилось.")
             rows.append(
                 [
                     callback_button(
@@ -1216,22 +1229,26 @@ class BotHandlers:
                     )
                 ]
             )
-            rows.append(
-                [
-                    callback_button(
-                        "❌ Отменить запись",
-                        Payload(
-                            "reg_cancel_confirm",
-                            event_id=event.id,
-                            registration_id=active_registration.id,
-                        ),
-                        intent="negative",
-                    )
-                ]
-            )
+            if (
+                active_registration.status == RegistrationStatus.CONFIRMED
+                and event_is_future
+            ):
+                rows.append(
+                    [
+                        callback_button(
+                            "❌ Отменить запись",
+                            Payload(
+                                "reg_cancel_confirm",
+                                event_id=event.id,
+                                registration_id=active_registration.id,
+                            ),
+                            intent="negative",
+                        )
+                    ]
+                )
         elif event.registration_closed:
             status_lines.append("Регистрация закрыта.")
-        elif event.starts_at <= self.now():
+        elif not event_is_future:
             status_lines.append("Мероприятие уже началось.")
         elif free <= 0:
             status_lines.append("Свободных мест нет.")
@@ -1355,7 +1372,7 @@ class BotHandlers:
             user_id=user_id,
             chat_id=chat_id,
             text=(
-                "✅ Запись подтверждена.\n"
+                "✅ Вы записаны.\n"
                 f"Мероприятие: {registration.event.title}\n"
                 f"Ваш код записи: {registration.code}\n\n"
                 "Покажите этот код организатору на входе."
@@ -1387,6 +1404,8 @@ class BotHandlers:
         self,
         user_id: int,
         chat_id: int | None,
+        *,
+        page: int = 0,
     ) -> None:
         registrations = self._visible_user_registrations(user_id)
         if not registrations:
@@ -1402,9 +1421,23 @@ class BotHandlers:
                 ),
             )
             return
-        lines = ["🎫 Ваши записи:"]
-        rows = []
-        for index, registration in enumerate(registrations, start=1):
+        total_pages = max(ceil(len(registrations) / MY_REGISTRATIONS_BOOK_PAGE_SIZE), 1)
+        page = max(min(page, total_pages - 1), 0)
+        first_offset = 1 + page * MY_REGISTRATIONS_BOOK_PAGE_SIZE
+        page_start = page * MY_REGISTRATIONS_BOOK_PAGE_SIZE
+        page_end = page_start + MY_REGISTRATIONS_BOOK_PAGE_SIZE
+        page_registrations = registrations[
+            page_start:page_end
+        ]
+        lines = [
+            "🎫 Книга моих записей",
+            f"Страница {page + 1}/{total_pages}",
+            "",
+            "Листайте книгу кнопками ниже и открывайте нужную запись.",
+        ]
+        rows: list[list[dict]] = []
+        current_detail_row: list[dict] = []
+        for index, registration in enumerate(page_registrations, start=first_offset):
             closed_registration_text = (
                 f"\n{REGISTRATION_CLOSED_ACTIVE_RECORD_TEXT}"
                 if (
@@ -1414,7 +1447,7 @@ class BotHandlers:
                 else ""
             )
             lines.append(
-                f"\n{registration.event.title}\n"
+                f"\n{index}. {registration.event.title}\n"
                 f"Код: {registration.code}\n"
                 f"Статус: {self._format_status_for_user(registration.status)}"
                 f"{closed_registration_text}"
@@ -1422,15 +1455,37 @@ class BotHandlers:
             is_active = registration.status in ACTIVE_REGISTRATION_STATUSES
             prefix = "✅" if is_active else "⚪"
             intent = "positive" if is_active else "default"
-            rows.append(
-                [
-                    callback_button(
-                        f"{prefix} {index} ℹ️ {self._short_button_title(registration.event.title)}",
-                        Payload("event_detail", event_id=registration.event_id),
-                        intent=intent,
-                    )
-                ]
+            current_detail_row.append(
+                callback_button(
+                    f"{prefix} {index} ℹ️ {self._short_button_title(registration.event.title)}",
+                    Payload(
+                        "event_detail",
+                        event_id=registration.event_id,
+                        value=str(page),
+                    ),
+                    intent=intent,
+                )
             )
+            if len(current_detail_row) == 2:
+                rows.append(current_detail_row)
+                current_detail_row = []
+        if current_detail_row:
+            rows.append(current_detail_row)
+
+        previous_page = (page - 1) % total_pages
+        next_page = (page + 1) % total_pages
+        rows.append(
+            [
+                callback_button(
+                    "⬅️ Назад",
+                    Payload("my_regs", value=str(previous_page)),
+                ),
+                callback_button(
+                    "➡️ Далее",
+                    Payload("my_regs", value=str(next_page)),
+                ),
+            ]
+        )
         rows.append([callback_button("📚 Каталог", Payload("catalog"))])
         rows.append([self._main_menu_button()])
         await self._send(
@@ -1444,14 +1499,14 @@ class BotHandlers:
         registrations = [
             registration
             for registration in self.registration_service.list_user_registrations(user_id)
-            if registration.event is not None and self._event_visible_to_users(registration.event)
+            if self._registration_visible_to_user(registration)
         ]
         active_event_ids = {
             registration.event_id
             for registration in registrations
             if registration.status in ACTIVE_REGISTRATION_STATUSES
         }
-        return [
+        visible_registrations = [
             registration
             for registration in registrations
             if (
@@ -1459,6 +1514,31 @@ class BotHandlers:
                 or registration.event_id not in active_event_ids
             )
         ]
+        current = self.now()
+        return sorted(
+            visible_registrations,
+            key=lambda item: (
+                abs((item.event.starts_at - current).total_seconds()),
+                item.event.starts_at,
+                item.id,
+            ),
+        )
+
+    def _registration_visible_to_user(self, registration: Registration) -> bool:
+        event = registration.event
+        if event is None:
+            return False
+        if self._event_visible_to_users(event):
+            return True
+        return (
+            registration.status == RegistrationStatus.ATTENDED
+            and self._recent_attended_event_visible(event)
+        )
+
+    def _recent_attended_event_visible(self, event: Event) -> bool:
+        current = self.now()
+        expires_at = event.starts_at + timedelta(days=ORGANIZER_EVENT_RETENTION_DAYS)
+        return event.starts_at <= current < expires_at
 
     async def _send_cancel_confirmation(
         self,
@@ -3105,7 +3185,7 @@ class BotHandlers:
     @staticmethod
     def _format_status(status: RegistrationStatus) -> str:
         mapping = {
-            RegistrationStatus.CONFIRMED: "Подтверждена",
+            RegistrationStatus.CONFIRMED: "Записан",
             RegistrationStatus.CANCELED_BY_USER: "Отменена пользователем",
             RegistrationStatus.CANCELED_BY_ORGANIZER: "Отменена организатором",
             RegistrationStatus.LATE_CANCELED: "Поздняя отмена",

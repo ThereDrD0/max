@@ -8,6 +8,7 @@ import pytest
 from app.bot.handlers import BotHandlers
 from app.bot.payloads import Payload
 from app.domain import AccessDeniedError
+from app.enums import RegistrationStatus
 from tests.conftest import FakeBotClient, create_event
 
 
@@ -56,6 +57,8 @@ async def test_user_accepts_consent_and_registers_for_event(
         payload=Payload("register_confirm", event_id=event.id).pack(),
     )
 
+    assert "Вы записаны" in fake_bot.sent[-1]["text"]
+    assert "Запись подтверждена" not in fake_bot.sent[-1]["text"]
     assert "код записи: PY2026" in fake_bot.sent[-1]["text"]
     assert "🔕 Уведомления" in str(fake_bot.sent[-1]["attachments"])
     assert "❌ Отменить" not in _button_texts(fake_bot.sent[-1])
@@ -702,17 +705,245 @@ async def test_my_registrations_links_to_event_detail_and_marks_status_visually(
 
     message = fake_bot.sent[-1]
     buttons = _buttons(message)
-    assert "Статус: ✅ Подтверждена" in message["text"]
+    assert "Статус: ✅ Записан" in message["text"]
+    assert "Подтверждена" not in message["text"]
     assert "Статус: ⚪ Отменена пользователем" in message["text"]
     assert "✅ 1 ℹ️ День открытых дверей..." in _button_texts(message)
     assert "⚪ 2 ℹ️ Онлайн-консультация..." in _button_texts(message)
     active_button = next(button for button in buttons if button["text"].startswith("✅ 1"))
     canceled_button = next(button for button in buttons if button["text"].startswith("⚪ 2"))
-    assert active_button["payload"] == Payload("event_detail", event_id=active_event.id).pack()
+    assert active_button["payload"] == Payload(
+        "event_detail",
+        event_id=active_event.id,
+        value="0",
+    ).pack()
     assert active_button["intent"] == "positive"
-    assert canceled_button["payload"] == Payload("event_detail", event_id=canceled_event.id).pack()
+    assert canceled_button["payload"] == Payload(
+        "event_detail",
+        event_id=canceled_event.id,
+        value="0",
+    ).pack()
     assert canceled_button["intent"] == "default"
     assert not any(button["payload"].startswith("reg_cancel") for button in buttons)
+
+
+async def test_my_registrations_book_paginates_six_items_in_double_buttons(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=iter([f"REC{i:03d}" for i in range(1, 8)]).__next__,
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    events = []
+    for day in range(1, 8):
+        event = create_event(
+            storage,
+            fixed_now,
+            title=f"Запись {day}",
+            starts_in=timedelta(days=day),
+        )
+        events.append(event)
+        handlers.registration_service.create_registration(101, event.id, None)
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs").pack(),
+    )
+
+    first_page = fake_bot.sent[-1]
+    assert "🎫 Книга моих записей" in first_page["text"]
+    assert "Страница 1/2" in first_page["text"]
+    for day in range(1, 7):
+        assert f"Запись {day}" in first_page["text"]
+    assert "Запись 7" not in first_page["text"]
+    first_rows = _keyboard_rows(first_page)
+    assert [button["text"] for button in first_rows[0]] == [
+        "✅ 1 ℹ️ Запись 1",
+        "✅ 2 ℹ️ Запись 2",
+    ]
+    assert [button["text"] for button in first_rows[1]] == [
+        "✅ 3 ℹ️ Запись 3",
+        "✅ 4 ℹ️ Запись 4",
+    ]
+    assert [button["text"] for button in first_rows[2]] == [
+        "✅ 5 ℹ️ Запись 5",
+        "✅ 6 ℹ️ Запись 6",
+    ]
+    first_buttons = {button["text"]: button for button in _buttons(first_page)}
+    assert first_buttons["⬅️ Назад"]["payload"] == Payload("my_regs", value="1").pack()
+    assert first_buttons["➡️ Далее"]["payload"] == Payload("my_regs", value="1").pack()
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs", value="1").pack(),
+    )
+
+    second_page = fake_bot.sent[-1]
+    assert "Страница 2/2" in second_page["text"]
+    assert "Запись 7" in second_page["text"]
+    assert "Запись 1" not in second_page["text"]
+    second_buttons = {button["text"]: button for button in _buttons(second_page)}
+    assert second_buttons["✅ 7 ℹ️ Запись 7"]["payload"] == Payload(
+        "event_detail",
+        event_id=events[6].id,
+        value="1",
+    ).pack()
+    assert second_buttons["⬅️ Назад"]["payload"] == Payload("my_regs", value="0").pack()
+    assert second_buttons["➡️ Далее"]["payload"] == Payload("my_regs", value="0").pack()
+
+
+async def test_my_registrations_sort_by_event_date_closeness(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    attended_event = create_event(
+        storage,
+        fixed_now,
+        title="Вчерашнее посещение",
+        starts_in=timedelta(days=1),
+    )
+    future_event = create_event(
+        storage,
+        fixed_now,
+        title="Через три дня",
+        starts_in=timedelta(days=3),
+    )
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, attended_event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=iter(["VIS001", "FUT003"]).__next__,
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    attended_registration = handlers.registration_service.create_registration(
+        101,
+        attended_event.id,
+        None,
+    )
+    handlers.organizer_service.mark_attended(501, attended_registration.id)
+    storage.update_event_start(attended_event.id, fixed_now - timedelta(days=1))
+    handlers.registration_service.create_registration(101, future_event.id, None)
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs").pack(),
+    )
+
+    message = fake_bot.sent[-1]
+    assert message["text"].index("1. Вчерашнее посещение") < message["text"].index(
+        "2. Через три дня"
+    )
+    assert "Статус: ✅ Пришёл" in message["text"]
+    assert "Статус: ✅ Записан" in message["text"]
+
+
+async def test_recent_attended_registration_stays_visible_with_readonly_detail(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(
+        storage,
+        fixed_now,
+        title="Недавнее посещение",
+        starts_in=timedelta(days=1),
+    )
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "DONE01",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+    handlers.organizer_service.mark_attended(501, registration.id)
+    storage.update_event_start(event.id, fixed_now - timedelta(days=6))
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs").pack(),
+    )
+
+    records = fake_bot.sent[-1]
+    assert "Недавнее посещение" in records["text"]
+    assert "Код: DONE01" in records["text"]
+    assert "Пришёл" in records["text"]
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("event_detail", event_id=event.id, value="0").pack(),
+    )
+
+    detail = fake_bot.sent[-1]
+    assert "Недавнее посещение" in detail["text"]
+    assert "Код записи: DONE01" in detail["text"]
+    assert "Мероприятие уже завершилось." in detail["text"]
+    button_texts = _button_texts(detail)
+    assert "📝 Записаться" not in button_texts
+    assert "❌ Отменить запись" not in button_texts
+
+
+async def test_old_attended_registration_is_hidden_from_my_registrations(
+    storage,
+    fake_bot,
+    fixed_now,
+):
+    event = create_event(
+        storage,
+        fixed_now,
+        title="Старое посещение",
+        starts_in=timedelta(days=1),
+    )
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(
+        storage,
+        fake_bot,
+        now=lambda: fixed_now,
+        app_env="prod",
+        code_generator=lambda: "OLDVIS",
+    )
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+    handlers.organizer_service.mark_attended(501, registration.id)
+    storage.update_event_start(event.id, fixed_now - timedelta(days=8))
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("my_regs").pack(),
+    )
+
+    assert "🎫 У вас пока нет записей." in fake_bot.sent[-1]["text"]
+    assert "Старое посещение" not in fake_bot.sent[-1]["text"]
 
 
 async def test_closed_registration_hides_catalog_but_keeps_user_record_visible(

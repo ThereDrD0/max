@@ -4,7 +4,7 @@ from datetime import timedelta
 
 from app.bot.handlers import BotHandlers
 from app.bot.payloads import Payload
-from app.enums import NotificationKind
+from app.enums import NotificationKind, RegistrationStatus
 from app.services.event_cleanup import EventCleanupService
 from app.services.registration import RegistrationService
 from app.storage.entities import NotificationOutbox
@@ -87,6 +87,7 @@ def test_cleanup_removes_expired_event_and_related_records(storage, fixed_now):
     registration = service.create_registration(101, event.id, None)
     storage.ensure_role(501, "organizer")
     storage.ensure_organizer_event(501, event.id)
+    storage.mark_attended(501, registration.id, now=fixed_now)
     storage.assign_event_slug(event.id, "old-event", now=fixed_now)
     storage.set_event_image(
         501,
@@ -108,6 +109,8 @@ def test_cleanup_removes_expired_event_and_related_records(storage, fixed_now):
         )
     )
     storage.update_event_start(event.id, fixed_now - timedelta(days=8))
+
+    assert storage.get_registration(registration.id).status == RegistrationStatus.ATTENDED
 
     removed_count = EventCleanupService(storage, now=lambda: fixed_now).cleanup()
 
