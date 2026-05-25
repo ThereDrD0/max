@@ -117,6 +117,69 @@ yc serverless function logs max-bot --since 30m --limit 200
 
 Порог `slow` настраивается переменной `PERFORMANCE_METRICS_SLOW_MS`, по умолчанию `1000`. Метрики можно выключить через `PERFORMANCE_METRICS_ENABLED=false`, но для диагностики медленных кнопок лучше держать их включёнными: это один структурированный лог на входящий вызов без записи в YDB.
 
+## Как читать `perf_metric`
+
+`perf_metric` — это внутренняя длительность обработки внутри кода бота. Она не равна строке Cloud Functions `REPORT Duration`, потому что `REPORT` включает холодный старт рантайма. Если в `REPORT` видно `Function Init Duration: 3000 ms`, а в `perf_metric.duration_ms` около `800`, значит пользовательский код работал около `800` мс, а остальное съел запуск Serverless.
+
+Быстрый просмотр последних строк:
+
+```powershell
+yc serverless function logs max-bot --since 30m --limit 300
+```
+
+Сводка по действиям:
+
+```powershell
+$lines = yc serverless function logs max-bot --since 30m --limit 500
+$metrics = foreach ($line in $lines) {
+    if ($line -match '\{.*"event":\s*"perf_metric".*\}$') {
+        $Matches[0] | ConvertFrom-Json
+    }
+}
+$metrics |
+    Group-Object trigger,action |
+    ForEach-Object {
+        $items = $_.Group
+        [pscustomobject]@{
+            action = $_.Name
+            count = $items.Count
+            avg_ms = [math]::Round(($items.duration_ms | Measure-Object -Average).Average, 1)
+            max_ms = [math]::Round(($items.duration_ms | Measure-Object -Maximum).Maximum, 1)
+            ydb_avg = [math]::Round(($items.ydb_ms | Measure-Object -Average).Average, 1)
+            max_avg = [math]::Round(($items.max_ms | Measure-Object -Average).Average, 1)
+            ydb_calls_avg = [math]::Round(($items.ydb_calls | Measure-Object -Average).Average, 1)
+            slow = @($items | Where-Object { $_.slow -eq $true }).Count
+        }
+    } |
+    Sort-Object action |
+    Format-Table -AutoSize
+```
+
+Читать строку лучше сверху вниз:
+
+- `trigger` показывает источник: `webhook` — пользователь нажал кнопку или написал команду, `timer` — фоновая отправка уведомлений.
+- `action` показывает кнопку или команду. Для нажатий на встроенные кнопки это имя из `Payload`, например `main_menu`, `catalog`, `event_detail`, `my_regs`.
+- `duration_ms` — главное число: сколько заняла обработка внутри бота.
+- `slow=true` означает, что `duration_ms` превысил `PERFORMANCE_METRICS_SLOW_MS`.
+- `dispatch_ms` — почти вся бизнес-логика после разбора webhook. Для кнопок обычно близко к `duration_ms`.
+- `storage_ms` и `storage_methods` показывают, какие методы хранилища были дорогими. Это уровень приложения: например `list_user_registrations`.
+- `ydb_ms`, `ydb_calls`, `ydb_methods` показывают реальные запросы к YDB внутри этих методов. `storage_ms` и `ydb_ms` не надо складывать: YDB уже входит внутрь `storage`.
+- `max_ms`, `max_calls`, `max_methods` показывают время API MAX. Если тут сотни миллисекунд или секунды, база уже не главный виновник.
+- `input_media_count` должен быть `0`. Если больше нуля, бот снова отправляет локальные картинки через fallback-загрузку.
+- `send_lock_wait_ms` показывает очередь отправки одному пользователю. Большое значение обычно означает быстрые повторные клики, которые сами выстроили очередь.
+
+Практическое правило простое: сначала смотрим `duration_ms`, потом ищем самый большой вклад между `ydb_ms`, `max_ms` и `send_lock_wait_ms`. После этого раскрываем `storage_methods`, `ydb_methods` или `max_methods`, чтобы увидеть конкретный метод.
+
+Свежий срез после оптимизации YDB-чтений 2026-05-25:
+
+| Действие | `duration_ms` | `ydb_calls` | `ydb_ms` | `max_ms` | Вывод |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `main_menu` | 755 | 7 | 655 | 97 | Основная тёплая цена — YDB: очистка временных состояний, проверка роли и запись `last_bot_message_id`. |
+| `my_regs` | 852 | 9 | 744 | 104 | В пределах ориентира `8-12` YDB-вызовов; узкое место — чтение списка записей и пакетная сборка связанных данных. |
+| `timer` | 375-1003 | 8 | 374-1002 | 0 | N+1 по регистрациям убран: цикл держится на 8 YDB-вызовах, но всё ещё почти полностью ждёт YDB. |
+
+По этим цифрам MAX сейчас не является главным тормозом для проверенных действий: отправка/редактирование занимает около `100` мс. Оставшаяся тёплая задержка почти целиком в YDB, плюс отдельно Cloud Functions часто добавляет холодный старт около `3-3.6` секунды в `REPORT`.
+
 ## Оптимизация YDB-чтений после метрик
 
 После удаления обязательной паузы на загрузку локальных картинок оставшаяся тёплая задержка в основном приходила из YDB. Метрики показали типичную картину не одной тяжёлой операции, а множества коротких сетевых запросов подряд: каталог тянул слоты по каждому мероприятию, карточка мероприятия искала активную запись через полный список записей пользователя, `my_regs` подтягивал мероприятие, слот и пользователя отдельно для каждой записи, а timer-обработчик синхронизации напоминаний ходил за регистрациями и outbox-строками в цикле.
