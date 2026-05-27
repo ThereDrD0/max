@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from app.enums import EventFormat
 from app.services.registration import RegistrationService
-from app.storage.entities import OrganizerState
+from app.storage.entities import Event, OrganizerState, Registration
 from app.storage.ydb import YdbStorage
 from tests.conftest import create_event
 
@@ -47,6 +48,55 @@ def test_ydb_touch_user_uses_supported_conditional_insert_shape(fixed_now, monke
     assert "FROM (" in insert_part
     assert "new_user.updated_at AS created_at" in insert_part
     assert "new_user.updated_at AS updated_at" in insert_part
+
+
+def test_ydb_create_registration_returns_transaction_result_without_reload(fixed_now, monkeypatch):
+    storage = object.__new__(YdbStorage)
+    event = Event(
+        id=10,
+        title="День открытых дверей",
+        description="",
+        requirements="",
+        starts_at=fixed_now + timedelta(days=1),
+        duration_minutes=60,
+        format=EventFormat.IN_PERSON,
+        location_or_url="Аудитория 1",
+        cancellation_policy_text="",
+        capacity_total=20,
+    )
+    registration = Registration(
+        id=20,
+        code="ABC123",
+        user_id=101,
+        event_id=event.id,
+        slot_id=None,
+        created_at=fixed_now,
+        updated_at=fixed_now,
+        event=event,
+    )
+
+    class PoolStub:
+        def retry_operation_sync(self, callee, retry_settings=None):
+            return registration
+
+    storage.pool = PoolStub()
+
+    def fail_get_registration(*args, **kwargs):
+        raise AssertionError("create_registration не должен перечитывать созданную запись")
+
+    monkeypatch.setattr(storage, "get_registration", fail_get_registration)
+
+    returned = storage.create_registration(
+        user_id=101,
+        event_id=event.id,
+        slot_id=None,
+        now=fixed_now,
+        code_generator=lambda: "ABC123",
+        render_reminder=lambda kind, event, registration: "Напоминание",
+    )
+
+    assert returned is registration
+    assert returned.event is event
 
 
 def test_get_user_roles_returns_all_roles(storage):

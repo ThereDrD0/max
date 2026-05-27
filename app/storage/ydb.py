@@ -675,8 +675,11 @@ class YdbStorage:
                     raise RegistrationClosedError("Регистрация на мероприятие закрыта")
                 if slots and slot_id is None:
                     raise SlotRequiredError("Для мероприятия нужно выбрать слот")
-                if slot_id is not None and not any(slot.id == slot_id for slot in slots):
-                    raise SlotNotFoundError("Слот не найден")
+                selected_slot = None
+                if slot_id is not None:
+                    selected_slot = next((slot for slot in slots if slot.id == slot_id), None)
+                    if selected_slot is None:
+                        raise SlotNotFoundError("Слот не найден")
                 active_key = self._active_key(user_id, event_id)
                 if self._tx_active_key_exists(tx, active_key):
                     raise DuplicateActiveRegistrationError("Активная запись уже есть")
@@ -724,6 +727,7 @@ class YdbStorage:
                         """,
                         {"$id": _int(event_id)},
                     )
+                    event.booked_count += 1
                 else:
                     self._tx_execute(
                         tx,
@@ -733,19 +737,19 @@ class YdbStorage:
                         """,
                         {"$id": _int(slot_id)},
                     )
+                    if selected_slot is not None:
+                        selected_slot.booked_count += 1
                 self._tx_schedule_reminders(tx, registration, event, current, render_reminder)
                 self._tx_audit(tx, user_id, "registration.created", "registration", str(registration.id), now=current)
                 self._tx_execute(tx, "SELECT 1;", commit=True)
-                return registration.id
+                registration.event = event
+                registration.slot = selected_slot
+                return registration
 
-        registration_id = self.pool.retry_operation_sync(
+        return self.pool.retry_operation_sync(
             callee,
             retry_settings=ydb.RetrySettings(max_retries=10, idempotent=False),
         )
-        registration = self.get_registration(registration_id)
-        if registration is None:  # pragma: no cover - defensive edge
-            raise RegistrationNotFoundError("Запись не найдена")
-        return registration
 
     def cancel_registration(
         self,
