@@ -50,10 +50,12 @@ from app.enums import (
     EventFormat,
     LateCancelPolicy,
     NotificationKind,
+    OutboxStatus,
     RegistrationStatus,
 )
 from app.services.admin import AdminService
 from app.services.event_cleanup import ORGANIZER_EVENT_RETENTION_DAYS
+from app.services.notification_worker import NotificationWorker
 from app.services.organizer import OrganizerService
 from app.services.registration import CodeGenerator, RegistrationService
 from app.services.registration_codes import (
@@ -1726,9 +1728,7 @@ class BotHandlers:
         *,
         page: int = 0,
     ) -> None:
-        registrations = self.organizer_service.get_event_registrations(user_id, event_id)
-        event = self.storage.get_event(event_id)
-        assert event is not None
+        event = self.storage.get_organizer_event(user_id, event_id)
         deeplink = await self._event_deeplink(event) if self._event_visible_to_users(event) else None
         reminder_buttons = [
             callback_button(
@@ -1751,7 +1751,7 @@ class BotHandlers:
             ],
             reminder_buttons,
         ]
-        if registrations:
+        if event.booked_count > 0:
             rows.append(
                 [
                     callback_button(
@@ -1834,7 +1834,14 @@ class BotHandlers:
             with_image=False,
         )
         registrations = self._sorted_participant_registrations(
-            self.organizer_service.get_event_registrations(user_id, event_id)
+            self.organizer_service.get_event_registrations(
+                user_id,
+                event_id,
+                with_event=False,
+                with_slot=False,
+                with_user=True,
+                with_images=False,
+            )
         )
         total_pages = max(ceil(len(registrations) / PARTICIPANTS_BOOK_PAGE_SIZE), 1)
         page = max(min(page, total_pages - 1), 0)
@@ -2291,12 +2298,18 @@ class BotHandlers:
             slot_id=state.data.get("slot_id"),
             custom_text=custom_text,
         )
+        sent = await self._send_created_notifications(created) if created else 0
         event_id = state.event_id
         self.storage.clear_organizer_state(user_id)
+        result_text = (
+            f"Отправлено напоминаний: {sent}."
+            if sent == len(created)
+            else f"Поставлено напоминаний в очередь: {len(created)}."
+        )
         await self._send(
             user_id=user_id,
             chat_id=chat_id,
-            text=f"Напоминание поставлено в очередь для {len(created)} участников.",
+            text=result_text,
             attachments=inline_keyboard(
                 [
                     [
@@ -2308,6 +2321,38 @@ class BotHandlers:
                 ]
             ),
         )
+
+    async def _send_created_notifications(self, notifications: list) -> int:
+        worker = NotificationWorker(
+            self.storage,
+            self.bot,
+            now=self.now,
+            max_bot_username=self.max_bot_username,
+            reminder_sync_interval_minutes=0,
+        )
+        sent = 0
+        for item in notifications:
+            try:
+                await self.bot.send_message(
+                    user_id=item.user_id,
+                    text=item.message_text,
+                    attachments=await worker._notification_attachments(item),
+                )
+            except Exception as exc:  # pragma: no cover - defensive edge
+                self.storage.set_notification_result(
+                    item.id,
+                    status=OutboxStatus.FAILED,
+                    now=self.now(),
+                    error=str(exc),
+                )
+                continue
+            self.storage.set_notification_result(
+                item.id,
+                status=OutboxStatus.SENT,
+                now=self.now(),
+            )
+            sent += 1
+        return sent
 
     async def _handle_pending_event_image(
         self,
@@ -2958,7 +3003,14 @@ class BotHandlers:
             return False
         return any(
             registration.status in ACTIVE_REGISTRATION_STATUSES
-            for registration in self.organizer_service.get_event_registrations(user_id, state.event_id)
+            for registration in self.organizer_service.get_event_registrations(
+                user_id,
+                state.event_id,
+                with_event=False,
+                with_slot=False,
+                with_user=False,
+                with_images=False,
+            )
         )
 
     def _save_builder_state(self, state: OrganizerState) -> None:
@@ -3108,14 +3160,12 @@ class BotHandlers:
         with_slots: bool = True,
         with_image: bool = True,
     ) -> Event:
-        self.organizer_service.get_event_registrations(user_id, event_id)
-        event = self.storage.get_event(
+        event = self.storage.get_organizer_event(
+            user_id,
             event_id,
             with_slots=with_slots,
             with_image=with_image,
         )
-        if event is None:
-            raise RegistrationClosedError("Мероприятие недоступно")
         return event
 
     async def _send_find_result(

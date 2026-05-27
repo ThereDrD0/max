@@ -59,8 +59,22 @@ class OrganizerService:
         self,
         actor_user_id: int,
         event_id: int,
+        *,
+        with_event: bool = True,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
     ) -> list[Registration]:
-        return self.storage.get_event_registrations(actor_user_id, event_id)
+        return self.storage.get_event_registrations(
+            actor_user_id,
+            event_id,
+            with_event=with_event,
+            with_event_slots=with_event_slots,
+            with_slot=with_slot,
+            with_user=with_user,
+            with_images=with_images,
+        )
 
     def find_registration_by_code(
         self,
@@ -89,7 +103,14 @@ class OrganizerService:
     def close_event(self, actor_user_id: int, event_id: int) -> EventCloseResult:
         event = self.storage.close_registration(actor_user_id, event_id)
         current = self.now()
-        registrations = self.storage.get_event_registrations(actor_user_id, event_id)
+        registrations = self.storage.get_event_registrations(
+            actor_user_id,
+            event_id,
+            with_event=False,
+            with_slot=False,
+            with_user=False,
+            with_images=False,
+        )
         notification_count = 0
         for registration in registrations:
             if registration.status not in ACTIVE_REGISTRATION_STATUSES:
@@ -301,7 +322,14 @@ class OrganizerService:
     ) -> Registration:
         registrations = [
             registration
-            for registration in self.storage.get_event_registrations(actor_user_id, event_id)
+            for registration in self.storage.get_event_registrations(
+                actor_user_id,
+                event_id,
+                with_event=False,
+                with_slot=False,
+                with_user=False,
+                with_images=False,
+            )
             if registration.user_id == participant_user_id
         ]
         if not registrations:
@@ -372,7 +400,14 @@ class OrganizerService:
             slot.id == slot_id for slot in event.slots
         ):
             raise SlotNotFoundError("Слот не найден")
-        registrations = self.storage.get_event_registrations(actor_user_id, event_id)
+        registrations = self.storage.get_event_registrations(
+            actor_user_id,
+            event_id,
+            with_event=False,
+            with_slot=False,
+            with_user=False,
+            with_images=False,
+        )
         created: list[NotificationOutbox] = []
         current = self.now()
         for registration in registrations:
@@ -442,6 +477,10 @@ class OrganizerService:
         for item in self.storage.get_event_registrations(
             actor_user_id,
             registration.event_id,
+            with_event=False,
+            with_slot=False,
+            with_user=True,
+            with_images=False,
         ):
             if item.id == registration_id:
                 return item

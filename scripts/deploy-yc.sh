@@ -77,8 +77,8 @@ yc serverless function version create \
   --function-name "$function_name" \
   --runtime python312 \
   --entrypoint index.handler \
-  --memory 128m \
-  --execution-timeout 10s \
+  --memory 512m \
+  --execution-timeout 30s \
   --service-account-id "$service_account_id" \
   --source-path ./dist/yc-package \
   --environment "$environment" >/dev/null

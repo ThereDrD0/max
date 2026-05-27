@@ -108,8 +108,8 @@ Invoke-YdbSchemaMigration
     --function-name $FunctionName `
     --runtime python312 `
     --entrypoint index.handler `
-    --memory 128m `
-    --execution-timeout 10s `
+    --memory 512m `
+    --execution-timeout 30s `
     --service-account-id $ServiceAccountId `
     --source-path $stage `
     --environment ($environment -join ",") | Out-Null

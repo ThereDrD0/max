@@ -9,7 +9,18 @@ from app.bot.payloads import Payload
 from app.domain import BotDomainError
 from app.enums import EventFormat, LateCancelPolicy, NotificationKind, RegistrationStatus
 from app.storage.entities import Event, EventSlot
+from app.storage.memory import MemoryStorage
 from tests.conftest import create_event
+
+
+class CountingRegistrationStorage(MemoryStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.event_registration_reads = 0
+
+    def get_event_registrations(self, *args, **kwargs):
+        self.event_registration_reads += 1
+        return super().get_event_registrations(*args, **kwargs)
 
 
 async def test_organizer_event_menu_uses_new_layout_and_image(
@@ -107,6 +118,23 @@ async def test_organizer_event_menu_hides_participants_button_without_registrati
     button_texts = _button_texts(fake_bot.sent[-1])
     assert "👥 Участники" not in button_texts
     assert "🔎 Отметить по коду" not in button_texts
+
+
+async def test_organizer_datetime_menu_does_not_load_participants(fake_bot, fixed_now):
+    storage = CountingRegistrationStorage()
+    event = create_event(storage, fixed_now, title="День открытых дверей")
+    storage.ensure_role(501, "organizer")
+    storage.ensure_organizer_event(501, event.id)
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+
+    await handlers.handle_callback(
+        user_id=501,
+        display_name="Организатор",
+        chat_id=9003,
+        payload=Payload("org_datetime", event_id=event.id).pack(),
+    )
+
+    assert storage.event_registration_reads == 0
 
 
 async def test_organizer_close_registration_requires_confirmation_and_hides_action(
@@ -397,7 +425,7 @@ async def test_organizer_reminder_with_slots_allows_scope_and_custom_text(
     assert "Ждём вас у входа в первый корпус." in manual_items[0].message_text
     assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in manual_items[0].message_text
     assert "🎫 Код записи: REM101" in manual_items[0].message_text
-    assert "Напоминание поставлено в очередь для 1 участников." in fake_bot.sent[-1]["text"]
+    assert "Отправлено напоминаний: 1." in fake_bot.sent[-1]["text"]
 
 
 async def test_organizer_reminder_auto_button_uses_default_text(
@@ -442,6 +470,11 @@ async def test_organizer_reminder_auto_button_uses_default_text(
     assert "🔔 Напоминание о мероприятии" in manual_items[0].message_text
     assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in manual_items[0].message_text
     assert "🎫 Код записи: AUTO01" in manual_items[0].message_text
+    assert manual_items[0].status.value == "sent"
+    assert any(
+        message["user_id"] == 101 and "🔔 Напоминание о мероприятии" in message["text"]
+        for message in fake_bot.sent
+    )
 
 
 async def test_organizer_participants_book_sorts_statuses_and_shows_action_buttons(

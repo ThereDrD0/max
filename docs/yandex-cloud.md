@@ -255,8 +255,8 @@ bash scripts/deploy-yc.sh max-bot "$SA_ID"
 ```text
 runtime: python312
 entrypoint: index.handler
-memory: 128m
-timeout: 10s
+memory: 512m
+timeout: 30s
 source-path: dist/yc-package
 ```
 

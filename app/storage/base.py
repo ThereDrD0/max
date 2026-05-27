@@ -74,6 +74,15 @@ class Storage(Protocol):
         with_image: bool = True,
     ) -> Event | None: ...
 
+    def get_organizer_event(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        *,
+        with_slots: bool = True,
+        with_image: bool = True,
+    ) -> Event: ...
+
     def assign_event_slug(
         self,
         event_id: int,
@@ -251,6 +260,12 @@ class Storage(Protocol):
         self,
         actor_user_id: int,
         event_id: int,
+        *,
+        with_event: bool = True,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
     ) -> list[Registration]: ...
 
     def find_registration_by_code(

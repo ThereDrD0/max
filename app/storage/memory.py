@@ -200,6 +200,21 @@ class MemoryStorage:
                 self._attach_event_image(event)
         return event
 
+    def get_organizer_event(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        *,
+        with_slots: bool = True,
+        with_image: bool = True,
+    ) -> Event:
+        if not self._has_event_access(actor_user_id, event_id):
+            raise AccessDeniedError("Нет доступа к этому мероприятию")
+        event = self.get_event(event_id, with_slots=with_slots, with_image=with_image)
+        if event is None:
+            raise EventNotFoundError("Мероприятие не найдено")
+        return event
+
     def assign_event_slug(
         self,
         event_id: int,
@@ -702,17 +717,32 @@ class MemoryStorage:
         self,
         actor_user_id: int,
         event_id: int,
+        *,
+        with_event: bool = True,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
     ) -> list[Registration]:
         self._require_event_access(actor_user_id, event_id)
-        return sorted(
+        registrations = sorted(
             [
-                self._attach_registration(item)
+                self._registration_without_related_objects(item)
                 for item in self.registrations.values()
                 if item.event_id == event_id
             ],
             key=lambda item: item.created_at,
             reverse=True,
         )
+        self._attach_registrations_batch(
+            registrations,
+            with_event=with_event,
+            with_event_slots=with_event_slots,
+            with_slot=with_slot,
+            with_user=with_user,
+            with_images=with_images,
+        )
+        return registrations
 
     def find_registration_by_code(
         self,
@@ -1132,12 +1162,9 @@ class MemoryStorage:
         )
 
     def _require_event_access(self, user_id: int, event_id: int) -> Event:
-        event = self._require_event(event_id)
         if not self._has_event_access(user_id, event_id):
             raise AccessDeniedError("Нет доступа к этому мероприятию")
-        event.slots = self._event_slots(event.id)
-        self._attach_event_image(event)
-        return event
+        return self._require_event(event_id)
 
     def _require_event_creator(self, user_id: int) -> None:
         if self._is_admin(user_id) or self.has_role(user_id, "organizer"):

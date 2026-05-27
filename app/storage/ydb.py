@@ -312,6 +312,21 @@ class YdbStorage:
             self._attach_event_image(event)
         return event
 
+    def get_organizer_event(
+        self,
+        actor_user_id: int,
+        event_id: int,
+        *,
+        with_slots: bool = True,
+        with_image: bool = True,
+    ) -> Event:
+        if not self._has_event_access(actor_user_id, event_id):
+            raise AccessDeniedError("Нет доступа к этому мероприятию")
+        event = self.get_event(event_id, with_slots=with_slots, with_image=with_image)
+        if event is None:
+            raise EventNotFoundError("Мероприятие не найдено")
+        return event
+
     def assign_event_slug(
         self,
         event_id: int,
@@ -1094,6 +1109,12 @@ class YdbStorage:
         self,
         actor_user_id: int,
         event_id: int,
+        *,
+        with_event: bool = True,
+        with_event_slots: bool = True,
+        with_slot: bool = True,
+        with_user: bool = True,
+        with_images: bool = True,
     ) -> list[Registration]:
         self._require_event_access(actor_user_id, event_id)
         rows = self._query(
@@ -1106,7 +1127,14 @@ class YdbStorage:
             {"$event_id": _int(event_id)},
         )
         registrations = [_registration(row) for row in rows]
-        self._attach_registrations_batch(registrations)
+        self._attach_registrations_batch(
+            registrations,
+            with_event=with_event,
+            with_event_slots=with_event_slots,
+            with_slot=with_slot,
+            with_user=with_user,
+            with_images=with_images,
+        )
         return registrations
 
     def find_registration_by_code(
@@ -1585,9 +1613,11 @@ class YdbStorage:
         return registration
 
     def _require_event_access(self, user_id: int, event_id: int) -> Event:
-        event = self._require_event(event_id)
         if not self._has_event_access(user_id, event_id):
             raise AccessDeniedError("Нет доступа к этому мероприятию")
+        event = self.get_event(event_id, with_slots=False, with_image=False)
+        if event is None:
+            raise EventNotFoundError("Мероприятие не найдено")
         return event
 
     def _require_event_creator(self, user_id: int) -> None:
