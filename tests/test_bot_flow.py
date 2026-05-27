@@ -1142,26 +1142,21 @@ async def test_event_detail_uses_direct_active_registration_lookup(
     assert f"Код записи: {registration.code}" in detail["text"]
 
 
-async def test_callback_touches_user_without_full_upsert(storage, fake_bot, fixed_now, monkeypatch):
+async def test_callback_does_not_touch_user_on_every_click(storage, fake_bot, fixed_now, monkeypatch):
     handlers = BotHandlers(
         storage,
         fake_bot,
         now=lambda: fixed_now,
         app_env="prod",
     )
-    touched = []
-    original_upsert = storage.upsert_user
 
-    def touch_user(user_id, display_name, **kwargs):
-        touched.append((user_id, display_name, kwargs))
-        original_upsert(user_id, display_name, now=kwargs.get("now"))
-        storage.record_profile_consent(user_id, "docs", now=fixed_now)
+    storage.upsert_user(101, "Анна", now=fixed_now)
+    storage.record_profile_consent(101, "docs", now=fixed_now)
 
-    def fail_upsert(*args, **kwargs):
-        raise AssertionError("Callback не должен делать полный upsert_user")
+    def fail_touch_user(*args, **kwargs):
+        raise AssertionError("Callback не должен писать пользователя на каждый клик")
 
-    monkeypatch.setattr(storage, "touch_user", touch_user, raising=False)
-    monkeypatch.setattr(storage, "upsert_user", fail_upsert)
+    monkeypatch.setattr(storage, "touch_user", fail_touch_user, raising=False)
 
     await handlers.handle_callback(
         user_id=101,
@@ -1171,7 +1166,6 @@ async def test_callback_touches_user_without_full_upsert(storage, fake_bot, fixe
         source_message_id="mid.1",
     )
 
-    assert touched
     assert fake_bot.edited[-1]["message_id"] == "mid.1"
 
 

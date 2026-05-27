@@ -247,7 +247,6 @@ class BotHandlers:
         payload: str,
         source_message_id: str | None = None,
     ) -> None:
-        self.registration_service.touch_user(user_id, display_name)
         data = Payload.unpack(payload)
         self._source_message_id = source_message_id
         try:

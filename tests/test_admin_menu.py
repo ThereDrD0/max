@@ -190,7 +190,7 @@ async def test_admin_organizer_book_paginates_and_detail_can_remove(
     detail = fake_bot.sent[-1]
     assert "🧑‍💼 Управление Организатором" in detail["text"]
     assert "[Организатор 01](max://user/701)" in detail["text"]
-    assert "Кем добавлен: [Администратор](max://user/501)" in detail["text"]
+    assert "Кем добавлен: [Главный администратор](max://user/501)" in detail["text"]
     assert "🗑️ Удалить Организатора" in _button_texts(detail)
     _assert_admin_ui_has_no_low_contrast_or_book_emojis(detail)
     assert detail["format"] == "markdown"
