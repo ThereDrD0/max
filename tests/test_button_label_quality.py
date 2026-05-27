@@ -243,7 +243,7 @@ def _ui_text_expressions(
 def _call_ui_text_arguments(node: ast.Call) -> list[ast.AST]:
     name = _call_name(node.func)
     expressions: list[ast.AST] = []
-    if name in {"_send", "send_message", "edit_message"}:
+    if name in {"_send", "send_message"}:
         expressions.extend(
             keyword.value for keyword in node.keywords if keyword.arg == "text"
         )

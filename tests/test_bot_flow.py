@@ -276,7 +276,7 @@ async def test_unknown_command_lists_available_commands(storage, fake_bot, fixed
     assert "/find" not in fake_bot.sent[-1]["text"]
 
 
-async def test_callback_edits_source_message_instead_of_adding_new_one(
+async def test_callback_sends_new_message_without_edit_or_delete(
     storage, fake_bot, fixed_now
 ):
     create_event(storage, fixed_now, title="Пробное занятие по Python")
@@ -294,16 +294,15 @@ async def test_callback_edits_source_message_instead_of_adding_new_one(
         display_name="Анна",
         chat_id=9001,
         payload=Payload("consent_accept").pack(),
-        source_message_id="mid.menu",
     )
 
-    assert fake_bot.sent == []
-    assert fake_bot.edited[-1]["message_id"] == "mid.menu"
-    assert "Запись на мероприятия" in fake_bot.edited[-1]["text"]
-    assert "📚 Мероприятия" in _button_texts(fake_bot.edited[-1])
+    assert fake_bot.edited == []
+    assert fake_bot.deleted == []
+    assert "Запись на мероприятия" in fake_bot.sent[-1]["text"]
+    assert "📚 Мероприятия" in _button_texts(fake_bot.sent[-1])
 
 
-async def test_text_command_deletes_source_user_message_after_reply(
+async def test_text_command_sends_new_message_without_deleting_source(
     storage, fake_bot, fixed_now
 ):
     create_event(storage, fixed_now, title="Пробное занятие по Python")
@@ -316,11 +315,28 @@ async def test_text_command_deletes_source_user_message_after_reply(
         "Анна",
         9001,
         "/events",
-        source_message_id="mid.user-command",
     )
 
     assert "Пробное занятие по Python" in fake_bot.sent[-1]["text"]
-    assert fake_bot.deleted == ["mid.user-command"]
+    assert fake_bot.deleted == []
+
+
+async def test_text_command_touches_user_after_reply(storage, fake_bot, fixed_now, monkeypatch):
+    create_event(storage, fixed_now, title="Пробное занятие по Python")
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    touched = []
+
+    def touch_user(*args, **kwargs):
+        assert fake_bot.sent, "touch_user должен выполняться после ответа пользователю"
+        touched.append(args[0])
+
+    monkeypatch.setattr(storage, "touch_user", touch_user, raising=False)
+
+    await handlers.handle_message(101, "Анна", 9001, "/events")
+
+    assert touched == [101]
 
 
 async def test_catalog_hides_raw_ids_in_prod_and_keeps_buttons_short(
@@ -419,10 +435,9 @@ async def test_catalog_opens_event_detail_before_booking(
         display_name="Анна",
         chat_id=9001,
         payload=Payload("event_detail", event_id=event.id).pack(),
-        source_message_id="mid.catalog",
     )
 
-    detail = fake_bot.edited[-1]
+    detail = fake_bot.sent[-1]
     assert "Встреча с кафедрой" in detail["text"]
     detail_buttons = detail["attachments"][0]["payload"]["buttons"]
     detail_flat_buttons = [button for row in detail_buttons for button in row]
@@ -1163,10 +1178,10 @@ async def test_callback_does_not_touch_user_on_every_click(storage, fake_bot, fi
         display_name="Анна",
         chat_id=9001,
         payload=Payload("main_menu").pack(),
-        source_message_id="mid.1",
     )
 
-    assert fake_bot.edited[-1]["message_id"] == "mid.1"
+    assert fake_bot.edited == []
+    assert "Запись на мероприятия" in fake_bot.sent[-1]["text"]
 
 
 async def test_main_menu_reads_roles_once(storage, fake_bot, fixed_now, monkeypatch):
@@ -1191,27 +1206,55 @@ async def test_main_menu_reads_roles_once(storage, fake_bot, fixed_now, monkeypa
         display_name="Администратор",
         chat_id=9001,
         payload=Payload("main_menu").pack(),
-        source_message_id="mid.1",
     )
 
     assert role_calls == [501]
-    text = fake_bot.edited[-1]["text"]
+    text = fake_bot.sent[-1]["text"]
     assert "/organizer" in text
     assert "/admin" in text
 
 
-async def test_edit_message_with_same_id_does_not_store_last_message(storage, fake_bot, fixed_now, monkeypatch):
+async def test_send_does_not_use_last_message_storage(storage, fake_bot, fixed_now):
     handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
-    handlers._source_message_id = "mid.1"
-
-    def fail_set_last(*args, **kwargs):
-        raise AssertionError("Редактирование того же сообщения не должно писать bot_sessions")
-
-    monkeypatch.setattr(storage, "set_last_bot_message_id", fail_set_last)
+    assert not hasattr(storage, "set_last_bot_message_id")
 
     await handlers._send(user_id=101, chat_id=9001, text="Меню")
 
-    assert fake_bot.edited[-1]["message_id"] == "mid.1"
+    assert fake_bot.sent[-1]["text"] == "Меню"
+    assert fake_bot.edited == []
+    assert fake_bot.deleted == []
+
+
+async def test_notification_toggle_replies_before_storage_update(
+    storage, fake_bot, fixed_now, monkeypatch
+):
+    event = create_event(storage, fixed_now)
+    handlers = BotHandlers(storage, fake_bot, now=lambda: fixed_now, app_env="prod")
+    handlers.registration_service.upsert_user(101, "Анна")
+    handlers.registration_service.record_profile_consent(101, "docs")
+    registration = handlers.registration_service.create_registration(101, event.id, None)
+    updates = []
+
+    def set_notifications_enabled(*args, **kwargs):
+        assert fake_bot.sent, "переключение уведомлений должно сначала ответить пользователю"
+        updates.append((args, kwargs))
+        return registration
+
+    monkeypatch.setattr(
+        handlers.registration_service,
+        "set_notifications_enabled",
+        set_notifications_enabled,
+    )
+
+    await handlers.handle_callback(
+        user_id=101,
+        display_name="Анна",
+        chat_id=9001,
+        payload=Payload("notif_toggle", registration_id=registration.id, value="off").pack(),
+    )
+
+    assert fake_bot.sent[-1]["text"] == "🔕 Уведомления по этой записи отключены."
+    assert updates
 
 
 async def test_command_clears_user_draft_state_once(storage, fake_bot, fixed_now, monkeypatch):
@@ -1225,6 +1268,7 @@ async def test_command_clears_user_draft_state_once(storage, fake_bot, fixed_now
         pass
 
     def clear_user_draft_state(user_id):
+        assert fake_bot.sent, "очистка черновика не должна задерживать ответ пользователю"
         cleared.append(user_id)
 
     def fail_clear_organizer_state(*args, **kwargs):
@@ -1274,7 +1318,6 @@ async def test_my_registrations_uses_lightweight_registration_loading(
         display_name="Анна",
         chat_id=9001,
         payload=Payload("my_regs").pack(),
-        source_message_id="mid.1",
     )
 
     assert calls == [
@@ -1288,7 +1331,7 @@ async def test_my_registrations_uses_lightweight_registration_loading(
             },
         )
     ]
-    assert "Консультация" in fake_bot.edited[-1]["text"]
+    assert "Консультация" in fake_bot.sent[-1]["text"]
 
 
 async def test_event_detail_refreshes_available_places_after_other_registration(
@@ -1458,7 +1501,7 @@ async def test_stale_booking_buttons_recheck_closed_registration(
     assert handlers.registration_service.list_user_registrations(101) == []
 
 
-async def test_repeated_start_deletes_previous_bot_message(
+async def test_repeated_start_keeps_previous_bot_messages(
     storage, fake_bot, fixed_now
 ):
     create_event(storage, fixed_now, title="Пробное занятие по Python")
@@ -1469,10 +1512,11 @@ async def test_repeated_start_deletes_previous_bot_message(
     await handlers.handle_message(101, "Анна", 9001, "/start")
     await handlers.handle_message(101, "Анна", 9001, "/start")
 
-    assert fake_bot.deleted == ["mid.1"]
+    assert len(fake_bot.sent) == 2
+    assert fake_bot.deleted == []
 
 
-async def test_concurrent_menu_aliases_leave_only_one_visible_bot_message(
+async def test_concurrent_menu_aliases_send_independent_messages(
     storage,
     fixed_now,
 ):
@@ -1493,8 +1537,7 @@ async def test_concurrent_menu_aliases_leave_only_one_visible_bot_message(
     )
 
     assert len(slow_bot.sent) == 2
-    assert slow_bot.deleted == ["mid.1"]
-    assert storage.get_last_bot_message_id(101) == "mid.2"
+    assert slow_bot.deleted == []
 
 
 async def test_catalog_shows_dev_ids_only_in_dev_mode(storage, fake_bot, fixed_now):

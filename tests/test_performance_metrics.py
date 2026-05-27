@@ -16,12 +16,6 @@ class _Bot:
     async def send_message(self, **kwargs):
         return "mid.send"
 
-    async def edit_message(self, **kwargs):
-        return "mid.edit"
-
-    async def delete_message(self, **kwargs):
-        return None
-
     async def get_bot_username(self):
         return "id123_bot"
 
@@ -38,17 +32,13 @@ async def test_measured_bot_client_counts_max_calls_and_input_media(tmp_path):
             text="hello",
             attachments=[local_image_attachment(image_path)],
         )
-        await measured.edit_message(message_id="mid.1", text="edited")
-        await measured.delete_message(message_id="mid.1")
         assert await measured.get_bot_username() == "id123_bot"
         assert current_trace() is trace
 
     metric = trace.to_metric(ok=True, status_code=200)
-    assert metric["max_calls"] == 4
+    assert metric["max_calls"] == 2
     assert metric["input_media_count"] == 1
     assert metric["max_methods"]["send_message"]["count"] == 1
-    assert metric["max_methods"]["edit_message"]["count"] == 1
-    assert metric["max_methods"]["delete_message"]["count"] == 1
     assert metric["max_methods"]["get_bot_username"]["count"] == 1
 
 

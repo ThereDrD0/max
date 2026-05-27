@@ -97,29 +97,6 @@ class FakeBotClient:
         self._next_message_id += 1
         return message_id
 
-    async def edit_message(
-        self,
-        *,
-        message_id: str,
-        text: str,
-        attachments: list | None = None,
-        notify: bool | None = None,
-        format: str | None = None,
-    ) -> None:
-        self.edited.append(
-            {
-                "message_id": message_id,
-                "text": text,
-                "attachments": attachments or [],
-                "notify": notify,
-                "format": format,
-            }
-        )
-        return message_id
-
-    async def delete_message(self, *, message_id: str) -> None:
-        self.deleted.append(message_id)
-
 
 @pytest.fixture()
 def fake_bot() -> FakeBotClient:

@@ -257,7 +257,7 @@ def test_function_handler_passes_image_attachments_to_pending_event_image(
     assert stored_event.image_token == "image-token"
     assert stored_event.image_url == "https://max.example/image.png"
     assert "Картинка обновлена" in fake_bot.sent[-1]["text"]
-    assert fake_bot.deleted == ["user-photo-mid"]
+    assert fake_bot.deleted == []
 
 
 def test_function_handler_reuses_open_event_loop_between_invocations(storage):
@@ -282,12 +282,6 @@ def test_function_handler_reuses_open_event_loop_between_invocations(storage):
             assert not current_loop.is_closed()
             self.calls += 1
             return f"mid.{self.calls}"
-
-        async def edit_message(self, *, message_id: str, text: str, attachments=None, notify=None):
-            return message_id
-
-        async def delete_message(self, *, message_id: str):
-            return None
 
     bot = LoopBoundBot()
     handler = create_function_handler(

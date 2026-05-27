@@ -276,12 +276,6 @@ async def test_event_detail_uses_bot_username_from_client_when_env_is_empty(
             )
             return "mid.1"
 
-        async def edit_message(self, *, message_id: str, text: str, attachments=None, notify=None):
-            return message_id
-
-        async def delete_message(self, *, message_id: str):
-            return None
-
     bot = UsernameBot()
     event = create_event(storage, fixed_now, title="Текущая встреча")
     storage.assign_event_slug(event.id, "current-event", now=fixed_now)

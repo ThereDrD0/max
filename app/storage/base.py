@@ -44,16 +44,6 @@ class Storage(Protocol):
 
     def get_user(self, user_id: int) -> User | None: ...
 
-    def get_last_bot_message_id(self, user_id: int) -> str | None: ...
-
-    def set_last_bot_message_id(
-        self,
-        user_id: int,
-        message_id: str | None,
-        *,
-        now: datetime | None = None,
-    ) -> None: ...
-
     def record_profile_consent(
         self,
         user_id: int,

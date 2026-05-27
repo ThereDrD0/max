@@ -19,20 +19,6 @@ class BotClient(Protocol):
     ) -> str | None:
         pass
 
-    async def edit_message(
-        self,
-        *,
-        message_id: str,
-        text: str,
-        attachments: list | None = None,
-        notify: bool | None = None,
-        format: str | None = None,
-    ) -> str | None:
-        pass
-
-    async def delete_message(self, *, message_id: str) -> None:
-        pass
-
     async def get_bot_username(self) -> str | None:
         pass
 
@@ -65,28 +51,6 @@ class MaxApiBotClient:
             format=_adapt_text_format(format),
         )
         return _extract_message_id(result)
-
-    async def edit_message(
-        self,
-        *,
-        message_id: str,
-        text: str,
-        attachments: list | None = None,
-        notify: bool | None = None,
-        format: str | None = None,
-    ) -> str | None:
-        prepared_attachments = _adapt_attachments(attachments)
-        await self.bot.edit_message(
-            message_id=message_id,
-            text=text,
-            attachments=prepared_attachments,
-            notify=notify,
-            format=_adapt_text_format(format),
-        )
-        return message_id
-
-    async def delete_message(self, *, message_id: str) -> None:
-        await self.bot.delete_message(message_id=message_id)
 
     async def get_bot_username(self) -> str | None:
         if self._bot_username_loaded:

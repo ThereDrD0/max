@@ -187,50 +187,6 @@ class YdbStorage:
         )
         return _user(row) if row else None
 
-    def get_last_bot_message_id(self, user_id: int) -> str | None:
-        row = self._one(
-            """
-            DECLARE $user_id AS Int64;
-            SELECT last_bot_message_id FROM bot_sessions WHERE user_id = $user_id;
-            """,
-            {"$user_id": _int(user_id)},
-        )
-        if row is None:
-            return None
-        message_id = row.get("last_bot_message_id")
-        return str(message_id) if message_id else None
-
-    def set_last_bot_message_id(
-        self,
-        user_id: int,
-        message_id: str | None,
-        *,
-        now: datetime | None = None,
-    ) -> None:
-        if message_id is None:
-            self._execute(
-                """
-                DECLARE $user_id AS Int64;
-                DELETE FROM bot_sessions WHERE user_id = $user_id;
-                """,
-                {"$user_id": _int(user_id)},
-            )
-            return
-        self._execute(
-            """
-            DECLARE $user_id AS Int64;
-            DECLARE $last_bot_message_id AS Utf8;
-            DECLARE $updated_at AS Timestamp;
-            UPSERT INTO bot_sessions (user_id, last_bot_message_id, updated_at)
-            VALUES ($user_id, $last_bot_message_id, $updated_at);
-            """,
-            {
-                "$user_id": _int(user_id),
-                "$last_bot_message_id": _utf8(message_id),
-                "$updated_at": _timestamp(now or utc_now()),
-            },
-        )
-
     def record_profile_consent(
         self,
         user_id: int,

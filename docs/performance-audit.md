@@ -15,7 +15,7 @@
 1. `app/function_handler.py` или `app/web.py` принимает событие.
 2. `dispatch_update(...)` в `app/bot/dispatcher.py` вызывает `BotHandlers`.
 3. `BotHandlers.handle_callback(...)` в `app/bot/handlers.py` выполняет бизнес-логику.
-4. `_send(...)` в `app/bot/handlers.py` ждёт `edit_message(...)` или `send_message(...)`.
+4. `_send(...)` в `app/bot/handlers.py` отправляет новое сообщение через `send_message(...)`.
 5. `MaxApiBotClient` в `app/bot/client.py` вызывает библиотеку `maxapi`.
 6. Если вложение является `InputMedia`, `maxapi` загружает файл, затем делает `await asyncio.sleep(bot.after_input_media_delay)`.
 
@@ -27,8 +27,7 @@ self.after_input_media_delay = after_input_media_delay or 2.0
 
 Пауза используется в:
 
-- `maxapi/maxapi/methods/send_message.py`;
-- `maxapi/maxapi/methods/edit_message.py`.
+- `maxapi/maxapi/methods/send_message.py`.
 
 ## Кнопки и действия, которые попадают в задержку 2 секунды
 
@@ -174,7 +173,7 @@ $metrics |
 
 | Действие | `duration_ms` | `ydb_calls` | `ydb_ms` | `max_ms` | Вывод |
 | --- | ---: | ---: | ---: | ---: | --- |
-| `main_menu` | 755 | 7 | 655 | 97 | Основная тёплая цена — YDB: очистка временных состояний, проверка роли и запись `last_bot_message_id`. |
+| `main_menu` | 755 | 7 | 655 | 97 | Старый срез до отказа от `bot_sessions`: основная тёплая цена была в YDB. |
 | `my_regs` | 852 | 9 | 744 | 104 | В пределах ориентира `8-12` YDB-вызовов; узкое место — чтение списка записей и пакетная сборка связанных данных. |
 | `timer` | 375-1003 | 8 | 374-1002 | 0 | N+1 по регистрациям убран: цикл держится на 8 YDB-вызовах, но всё ещё почти полностью ждёт YDB. |
 
@@ -186,7 +185,7 @@ $metrics |
 
 - `touch_user(...)` заменяет полный `upsert_user(...)` в webhook и не читает пользователя перед записью;
 - главное меню читает все роли пользователя одним `get_user_roles(...)`, вместо отдельных проверок Организатора и админа;
-- после успешного редактирования того же сообщения бот не пишет `last_bot_message_id` повторно;
+- бот больше не редактирует и не удаляет старые сообщения, поэтому не читает и не пишет `last_bot_message_id`;
 - переходы в главное меню и команды `/organizer`, `/admin` чистят черновики одним `clear_user_draft_state(...)`;
 - `my_regs` грузит только данные для списка записей: записи и мероприятия без слотов, картинок и пользователя;
 - обычный timer сначала ищет due-уведомления, а полную repair-синхронизацию напоминаний запускает только в sync-окне.

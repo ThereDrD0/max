@@ -30,14 +30,6 @@ SCHEMA_STATEMENTS = [
     );
     """,
     """
-    CREATE TABLE IF NOT EXISTS bot_sessions (
-        user_id Int64 NOT NULL,
-        last_bot_message_id Utf8,
-        updated_at Timestamp,
-        PRIMARY KEY (user_id)
-    );
-    """,
-    """
     CREATE TABLE IF NOT EXISTS events (
         id Int64 NOT NULL,
         title Utf8,

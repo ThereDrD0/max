@@ -425,7 +425,17 @@ async def test_organizer_reminder_with_slots_allows_scope_and_custom_text(
     assert "Ждём вас у входа в первый корпус." in manual_items[0].message_text
     assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in manual_items[0].message_text
     assert "🎫 Код записи: REM101" in manual_items[0].message_text
-    assert "Отправлено напоминаний: 1." in fake_bot.sent[-1]["text"]
+    confirmation_index = next(
+        index
+        for index, message in enumerate(fake_bot.sent)
+        if message["user_id"] == 501 and message["text"] == "Запускаю отправку напоминаний: 1."
+    )
+    participant_index = next(
+        index
+        for index, message in enumerate(fake_bot.sent)
+        if message["user_id"] == 101 and "Ждём вас у входа в первый корпус." in message["text"]
+    )
+    assert confirmation_index < participant_index
 
 
 async def test_organizer_reminder_auto_button_uses_default_text(
@@ -471,6 +481,17 @@ async def test_organizer_reminder_auto_button_uses_default_text(
     assert "📅 Начало: 24.05.2026 12:00 (через 3 дня)" in manual_items[0].message_text
     assert "🎫 Код записи: AUTO01" in manual_items[0].message_text
     assert manual_items[0].status.value == "sent"
+    confirmation_index = next(
+        index
+        for index, message in enumerate(fake_bot.sent)
+        if message["user_id"] == 501 and message["text"] == "Запускаю отправку напоминаний: 1."
+    )
+    participant_index = next(
+        index
+        for index, message in enumerate(fake_bot.sent)
+        if message["user_id"] == 101 and "🔔 Напоминание о мероприятии" in message["text"]
+    )
+    assert confirmation_index < participant_index
     assert any(
         message["user_id"] == 101 and "🔔 Напоминание о мероприятии" in message["text"]
         for message in fake_bot.sent

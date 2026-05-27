@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from math import ceil
@@ -120,6 +121,7 @@ STATE_ADMIN_ADD_ORGANIZER = "admin_add_organizer"
 STATE_ADMIN_REMOVE_ORGANIZER = "admin_remove_organizer"
 CREATE_EVENT_BUTTON_TEXT = "📝 Создать мероприятие"
 TAKE_CURRENT_TEXT = "♻️ ВЗЯТЬ ТЕКУЩЕЕ"
+logger = logging.getLogger(__name__)
 
 
 def _send_lock_for(user_id: int) -> asyncio.Lock:
@@ -152,8 +154,6 @@ class BotHandlers:
         self.documents_version = documents_version
         self.dev_mode = app_env.lower() in {"dev", "development", "local", "test"}
         self.max_bot_username = max_bot_username
-        self._source_message_id: str | None = None
-        self._source_user_message_id: str | None = None
         self.registration_service = RegistrationService(
             storage,
             now=self.now,
@@ -173,11 +173,13 @@ class BotHandlers:
         chat_id: int | None,
         start_payload: str | None = None,
     ) -> None:
-        self.registration_service.touch_user(user_id, display_name)
-        if start_payload:
-            await self._send_deeplink_entrypoint(user_id, chat_id, start_payload)
-            return
-        await self._send_entrypoint(user_id, chat_id)
+        try:
+            if start_payload:
+                await self._send_deeplink_entrypoint(user_id, chat_id, start_payload)
+                return
+            await self._send_entrypoint(user_id, chat_id)
+        finally:
+            self._touch_user_best_effort(user_id, display_name)
 
     async def handle_message(
         self,
@@ -185,20 +187,17 @@ class BotHandlers:
         display_name: str,
         chat_id: int | None,
         text: str,
-        source_message_id: str | None = None,
         attachments: list | None = None,
     ) -> None:
-        self.registration_service.touch_user(user_id, display_name)
-        self._source_user_message_id = source_message_id
         try:
             normalized = (text or "").strip()
             if normalized == "/organizer":
-                self.storage.clear_user_draft_state(user_id)
                 await self._send_organizer_menu(user_id, chat_id)
+                self._clear_user_draft_state_best_effort(user_id)
                 return
             if normalized == "/admin":
-                self.storage.clear_user_draft_state(user_id)
                 await self._send_admin_menu(user_id, chat_id)
+                self._clear_user_draft_state_best_effort(user_id)
                 return
             organizer_state = self.storage.get_organizer_state(user_id)
             if organizer_state is not None:
@@ -237,7 +236,7 @@ class BotHandlers:
                 text=self._unknown_command_text(user_id),
             )
         finally:
-            self._source_user_message_id = None
+            self._touch_user_best_effort(user_id, display_name)
 
     async def handle_callback(
         self,
@@ -245,10 +244,8 @@ class BotHandlers:
         display_name: str,
         chat_id: int | None,
         payload: str,
-        source_message_id: str | None = None,
     ) -> None:
         data = Payload.unpack(payload)
-        self._source_message_id = source_message_id
         try:
             await self._dispatch_callback(user_id, chat_id, data)
         except BotDomainError as exc:
@@ -257,8 +254,6 @@ class BotHandlers:
                 chat_id=chat_id,
                 text=self._friendly_error(exc),
             )
-        finally:
-            self._source_message_id = None
 
     async def _dispatch_callback(
         self,
@@ -283,8 +278,8 @@ class BotHandlers:
                 return
             await self._send_event_detail(user_id, chat_id, event.id)
         elif data.action == "main_menu":
-            self.storage.clear_user_draft_state(user_id)
             await self._send_main_menu(user_id, chat_id)
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "catalog":
             await self._send_catalog(user_id, chat_id, page=self._payload_page(data))
         elif data.action == "event_detail" and data.event_id is not None:
@@ -336,16 +331,19 @@ class BotHandlers:
             )
         elif data.action == "notif_toggle" and data.registration_id is not None:
             enabled = data.value == "on"
-            self.registration_service.set_notifications_enabled(
-                user_id,
-                data.registration_id,
-                enabled=enabled,
-            )
             text = "🔔 Уведомления по этой записи включены." if enabled else "🔕 Уведомления по этой записи отключены."
             await self._send(user_id=user_id, chat_id=chat_id, text=text)
+            self._run_best_effort(
+                "set_notifications_enabled",
+                lambda: self.registration_service.set_notifications_enabled(
+                    user_id,
+                    data.registration_id,
+                    enabled=enabled,
+                ),
+            )
         elif data.action == "admin_menu":
-            self.storage.clear_organizer_state(user_id)
             await self._send_admin_menu(user_id, chat_id)
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "admin_org_add":
             await self._start_admin_organizer_input(
                 user_id,
@@ -359,28 +357,28 @@ class BotHandlers:
                 mode=STATE_ADMIN_REMOVE_ORGANIZER,
             )
         elif data.action == "admin_org_list":
-            self.storage.clear_organizer_state(user_id)
             await self._send_admin_organizer_list(
                 user_id,
                 chat_id,
                 page=self._payload_page(data),
             )
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "admin_org_detail" and data.event_id is not None:
-            self.storage.clear_organizer_state(user_id)
             await self._send_admin_organizer_detail(
                 user_id,
                 chat_id,
                 data.event_id,
                 page=self._payload_page(data),
             )
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "admin_org_remove_confirm" and data.event_id is not None:
-            self.storage.clear_organizer_state(user_id)
             await self._send_admin_organizer_remove_confirmation(
                 user_id,
                 chat_id,
                 data.event_id,
                 page=self._payload_page(data),
             )
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "admin_org_remove_apply" and data.event_id is not None:
             removed = self.admin_service.remove_organizer(user_id, data.event_id)
             await self._send(
@@ -399,29 +397,30 @@ class BotHandlers:
                     ]
                 ),
             )
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "org_menu":
-            self.storage.clear_organizer_state(user_id)
             await self._send_organizer_menu(
                 user_id,
                 chat_id,
                 page=self._payload_page(data),
             )
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "org_event" and data.event_id is not None:
-            self.storage.clear_organizer_state(user_id)
             await self._send_organizer_event(
                 user_id,
                 chat_id,
                 data.event_id,
                 page=self._payload_page(data),
             )
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "org_participants" and data.event_id is not None:
-            self.storage.clear_organizer_state(user_id)
             await self._send_organizer_participants(
                 user_id,
                 chat_id,
                 data.event_id,
                 page=self._payload_page(data),
             )
+            self._clear_user_draft_state_best_effort(user_id)
         elif data.action == "org_attendance_lookup" and data.event_id is not None:
             await self._start_attendance_lookup(
                 user_id,
@@ -2297,13 +2296,11 @@ class BotHandlers:
             slot_id=state.data.get("slot_id"),
             custom_text=custom_text,
         )
-        sent = await self._send_created_notifications(created) if created else 0
         event_id = state.event_id
-        self.storage.clear_organizer_state(user_id)
         result_text = (
-            f"Отправлено напоминаний: {sent}."
-            if sent == len(created)
-            else f"Поставлено напоминаний в очередь: {len(created)}."
+            f"Запускаю отправку напоминаний: {len(created)}."
+            if created
+            else "Нет записей для отправки напоминания."
         )
         await self._send(
             user_id=user_id,
@@ -2320,6 +2317,9 @@ class BotHandlers:
                 ]
             ),
         )
+        self._clear_user_draft_state_best_effort(user_id)
+        if created:
+            await self._send_created_notifications(created)
 
     async def _send_created_notifications(self, notifications: list) -> int:
         worker = NotificationWorker(
@@ -3428,33 +3428,6 @@ class BotHandlers:
         attachments: list | None = None,
         format: str | None = None,
     ) -> None:
-        if self._source_message_id is not None:
-            try:
-                edit_kwargs = {
-                    "message_id": self._source_message_id,
-                    "text": text,
-                    "attachments": attachments,
-                    "notify": False,
-                }
-                if format is not None:
-                    edit_kwargs["format"] = format
-                message_id = await self.bot.edit_message(**edit_kwargs)
-                if message_id and message_id != self._source_message_id:
-                    self.storage.set_last_bot_message_id(
-                        user_id,
-                        message_id,
-                        now=self.now(),
-                    )
-                await self._delete_source_user_message()
-                return
-            except Exception:
-                pass
-        previous_message_id = self.storage.get_last_bot_message_id(user_id)
-        if previous_message_id:
-            try:
-                await self.bot.delete_message(message_id=previous_message_id)
-            except Exception:
-                pass
         send_kwargs = {
             "user_id": user_id,
             "chat_id": chat_id,
@@ -3463,20 +3436,26 @@ class BotHandlers:
         }
         if format is not None:
             send_kwargs["format"] = format
-        message_id = await self.bot.send_message(**send_kwargs)
-        if message_id:
-            self.storage.set_last_bot_message_id(user_id, message_id, now=self.now())
-        await self._delete_source_user_message()
+        await self.bot.send_message(**send_kwargs)
 
-    async def _delete_source_user_message(self) -> None:
-        message_id = self._source_user_message_id
-        self._source_user_message_id = None
-        if not message_id:
-            return
+    def _touch_user_best_effort(self, user_id: int, display_name: str) -> None:
+        self._run_best_effort(
+            "touch_user",
+            lambda: self.registration_service.touch_user(user_id, display_name),
+        )
+
+    def _clear_user_draft_state_best_effort(self, user_id: int) -> None:
+        self._run_best_effort(
+            "clear_user_draft_state",
+            lambda: self.storage.clear_user_draft_state(user_id),
+        )
+
+    @staticmethod
+    def _run_best_effort(action: str, callback: Callable[[], None]) -> None:
         try:
-            await self.bot.delete_message(message_id=message_id)
-        except Exception:
-            pass
+            callback()
+        except Exception:  # pragma: no cover - defensive logging
+            logger.warning("Best-effort action failed: %s", action, exc_info=True)
 
     @staticmethod
     def _payload_page(data: Payload) -> int:

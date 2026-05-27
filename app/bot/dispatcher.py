@@ -52,7 +52,6 @@ async def dispatch_update(
             display_name=_display_name(sender),
             chat_id=recipient.get("chat_id"),
             text=body.get("text") or "",
-            source_message_id=body.get("mid"),
             attachments=body.get("attachments") or [],
         )
         return
@@ -66,7 +65,6 @@ async def dispatch_update(
             display_name=_display_name(user),
             chat_id=recipient.get("chat_id"),
             payload=callback.get("payload") or "",
-            source_message_id=(message.get("body") or {}).get("mid"),
         )
 
 

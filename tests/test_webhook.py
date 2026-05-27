@@ -75,7 +75,7 @@ def test_webhook_emits_fastapi_perf_metric(storage, fake_bot, capsys):
     assert metrics[0]["action"] == "bot_started"
 
 
-def test_webhook_deletes_message_created_source_message(storage, fake_bot, fixed_now):
+def test_webhook_keeps_message_created_source_message(storage, fake_bot, fixed_now):
     create_event(storage, fixed_now, title="Пробное занятие по Python")
     storage.upsert_user(101, "Анна", now=fixed_now)
     storage.record_profile_consent(101, "docs", now=fixed_now)
@@ -102,7 +102,7 @@ def test_webhook_deletes_message_created_source_message(storage, fake_bot, fixed
 
     assert response.status_code == 200
     assert "Пробное занятие по Python" in fake_bot.sent[-1]["text"]
-    assert fake_bot.deleted == ["mid.user-command"]
+    assert fake_bot.deleted == []
 
 
 def test_webhook_accepts_bot_started_deeplink_payload(storage, fake_bot, fixed_now):

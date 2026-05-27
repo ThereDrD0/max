@@ -71,7 +71,6 @@ class MemoryStorage:
         self.audit_log: dict[int, AuditLog] = {}
         self.registration_codes: dict[str, int] = {}
         self.active_registration_keys: dict[str, int] = {}
-        self.bot_sessions: dict[int, str] = {}
         self.event_deeplinks: dict[str, int] = {}
         self.event_images: dict[int, tuple[str | None, str | None, int, datetime]] = {}
         self.pending_event_images: dict[int, tuple[int, datetime]] = {}
@@ -130,22 +129,6 @@ class MemoryStorage:
 
     def get_user(self, user_id: int) -> User | None:
         return self.users.get(user_id)
-
-    def get_last_bot_message_id(self, user_id: int) -> str | None:
-        return self.bot_sessions.get(user_id)
-
-    def set_last_bot_message_id(
-        self,
-        user_id: int,
-        message_id: str | None,
-        *,
-        now: datetime | None = None,
-    ) -> None:
-        with self._lock:
-            if message_id is None:
-                self.bot_sessions.pop(user_id, None)
-                return
-            self.bot_sessions[user_id] = message_id
 
     def record_profile_consent(
         self,

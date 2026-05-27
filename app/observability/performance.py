@@ -228,12 +228,6 @@ class MeasuredBotClient:
     async def send_message(self, **kwargs):
         return await self._call("send_message", **kwargs)
 
-    async def edit_message(self, **kwargs):
-        return await self._call("edit_message", **kwargs)
-
-    async def delete_message(self, **kwargs):
-        return await self._call("delete_message", **kwargs)
-
     async def get_bot_username(self) -> str | None:
         method = getattr(self._inner, "get_bot_username", None)
         if method is None:
