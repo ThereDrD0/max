@@ -1,30 +1,54 @@
-# MAX-бот записи абитуриента на мероприятие
+# MAX-бот записи на мероприятия университета
 
-Бот реализует сценарий из кейса: абитуриент принимает дисклеймер, выбирает мероприятие и слот, получает код записи, смотрит свои записи, отменяет их до начала мероприятия и управляет уведомлениями. Организатор видит свои мероприятия, ищет запись по коду, закрывает регистрацию, отмечает посещение и отправляет разрешённые уведомления.
+Это бот для MAX, который помогает абитуриентам записываться на мероприятия университета, а Организаторам управлять этими мероприятиями и участниками.
 
-Миниаппы не используются. Телефон, паспортные и банковские данные не собираются. Чувствительные настройки хранятся в `.env`; шаблон лежит в `.env.example`.
+Проект можно запустить локально, поднять на своем сервере как обычное FastAPI-приложение или развернуть в Yandex Cloud Functions вместе с YDB Serverless. Основной продакшен-сценарий сейчас рассчитан на Yandex serverless: webhook MAX вызывает Cloud Function, данные лежат в YDB, а напоминания отправляются по timer trigger.
 
-## Архитектура
+## Что умеет бот
 
-Основной бесплатный вариант размещения: Yandex Cloud Functions + YDB Serverless. Docker оставлен для локальной разработки и тестов.
+Абитуриент:
 
-Локально приложение запускается как FastAPI-сервис:
+- принимает дисклеймер о минимальной обработке данных;
+- смотрит каталог ближайших мероприятий;
+- открывает карточку мероприятия по меню или публичной ссылке;
+- выбирает слот, если мероприятие разделено на временные окна;
+- получает код записи;
+- смотрит свои записи, отменяет их и включает или отключает уведомления.
 
-- `POST /webhook` — входящие события MAX;
-- `GET /healthz` — приложение живо;
-- `GET /readyz` — приложение живо и хранилище доступно.
+Организатор:
 
-В облаке тот же обработчик используется через `index.handler`: `POST` принимает webhook MAX, `GET` отдаёт health, timer trigger отправляет уведомления из `notification_outbox`.
+- видит доступные ему мероприятия;
+- создает и редактирует мероприятия;
+- закрывает регистрацию или все мероприятие;
+- смотрит участников;
+- ищет запись по коду;
+- отмечает посещение;
+- отправляет разрешенные уведомления участникам.
 
-Подробная документация:
+Администратор:
 
-- [Работа с YDB](docs/ydb.md)
-- [Работа с MAX API](docs/max-api.md)
-- [Серверная часть в Yandex Cloud](docs/yandex-cloud.md)
+- назначает и снимает роль Организатора;
+- видит Организаторов, которые назначены через интерфейс и через конфигурацию.
 
-## Быстрый локальный запуск через Docker
+Миниаппы не используются. Телефон, паспортные и банковские данные не собираются. Бот хранит только MAX user id, отображаемое имя, выбранное мероприятие, запись, статус записи и служебные данные для уведомлений.
 
-Windows:
+## Карта документации
+
+Начните отсюда, если впервые видите кодовую базу:
+
+- [Архитектура проекта](docs/architecture.md) — как связаны webhook, обработчики, сервисы, хранилище, YDB и уведомления.
+- [Пользовательские сценарии](docs/user-flows.md) — как бот ведет абитуриента, Организатора и администратора.
+- [Запуск проекта с нуля](docs/development.md) — локальный запуск, переменные окружения и выбор хостинга: свой сервер или Yandex serverless.
+- [Работа с MAX API](docs/max-api.md) — webhook, подписки, кнопки, диплинки, отправка сообщений и картинки.
+- [Работа с YDB](docs/ydb.md) — схема данных, транзакции, индексы и сравнение с PostgreSQL.
+- [Деплой в Yandex Cloud](docs/yandex-cloud.md) — Cloud Functions, YDB Serverless, service account, timer trigger, сборка и обновление версии.
+- [Производительность и метрики](docs/performance-audit.md) — `perf_metric`, cold start, YDB-вызовы, MAX-вызовы и диагностика задержек.
+- [Глоссарий UI](docs/glossary.md) — принятые пользовательские термины.
+- [Картинки MAX](docs/max-image-assets.md) — как заранее загрузить часто используемые картинки и отправлять их по `token`.
+
+## Быстрый локальный запуск
+
+На Windows:
 
 ```powershell
 Copy-Item .env.example .env
@@ -32,7 +56,7 @@ notepad .env
 .\scripts\dev-up.ps1 -Build
 ```
 
-Linux:
+На Linux:
 
 ```bash
 cp .env.example .env
@@ -40,30 +64,20 @@ nano .env
 bash scripts/dev-up.sh --build
 ```
 
-Docker Compose поднимет локальную YDB и бота. Бот создаст схему, загрузит `seed/events.yaml` и запустит `uvicorn` на порту `8080`.
-
-Проверка:
+Docker Compose поднимет локальную YDB и приложение на порту `8080`. Проверка:
 
 ```bash
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
 
-YDB UI:
+Локальная YDB UI:
 
 ```text
 http://localhost:8765
 ```
 
-Остановка:
-
-```powershell
-.\scripts\dev-down.ps1
-```
-
-```bash
-bash scripts/dev-down.sh
-```
+MAX не сможет вызвать ваш `localhost` напрямую. Для настоящего webhook нужен публичный HTTPS-адрес: Cloud Functions, свой сервер с доменом и TLS или временный tunnel-сервис для разработки.
 
 ## Локальная проверка webhook
 
@@ -77,41 +91,11 @@ bash scripts/dev-down.sh
 bash scripts/send-sample-update.sh
 ```
 
-Скрипт отправляет `bot_started` на `http://localhost:8080/webhook` с заголовком `X-Max-Bot-Api-Secret`.
+Скрипт отправляет `bot_started` на локальный endpoint `POST /webhook` с заголовком `X-Max-Bot-Api-Secret`.
 
-## Локальный запуск без Docker
+## ENV минимум
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e .[test,migration]
-Copy-Item .env.example .env
-notepad .env
-python -m app.ydb_schema
-python -m app.seed
-uvicorn app.main:app --host 0.0.0.0 --port 8080
-```
-
-Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e '.[test,migration]'
-cp .env.example .env
-nano .env
-python -m app.ydb_schema
-python -m app.seed
-uvicorn app.main:app --host 0.0.0.0 --port 8080
-```
-
-Если YDB запущена не на `localhost:2136`, поменяйте `YDB_ENDPOINT` и `YDB_DATABASE` в `.env`.
-
-## ENV-настройки
-
-Минимальный локальный пример:
+Шаблон лежит в [.env.example](.env.example). Для локального Docker-запуска достаточно заполнить:
 
 ```env
 APP_ENV=local
@@ -124,78 +108,13 @@ STORAGE_BACKEND=ydb
 YDB_ENDPOINT=grpc://localhost:2136
 YDB_DATABASE=/local
 YDB_METADATA_CREDENTIALS=false
-SOURCE_DATABASE_URL=
 ADMIN_USER_IDS=
 ORGANIZER_USER_IDS=
 MAX_API_RPS=30
 DOCUMENTS_VERSION=hackathon-2026-05
 ```
 
-Продакшен-пример:
-
-```env
-APP_ENV=prod
-MAX_BOT_TOKEN=<секретный токен MAX>
-MAX_BOT_USERNAME=<ник бота без @>
-WEBHOOK_URL=https://functions.yandexcloud.net/<function_id>
-WEBHOOK_SECRET=<секрет webhook>
-WEBHOOK_PATH=/webhook
-STORAGE_BACKEND=ydb
-YDB_ENDPOINT=grpcs://ydb.serverless.yandexcloud.net:2135
-YDB_DATABASE=/ru-central1/<cloud_id>/<database_id>
-YDB_METADATA_CREDENTIALS=1
-SOURCE_DATABASE_URL=
-ADMIN_USER_IDS=<MAX user id администратора>
-ORGANIZER_USER_IDS=<MAX user id организаторов через запятую>
-MAX_API_RPS=30
-DOCUMENTS_VERSION=hackathon-2026-05
-```
-
-Подробная таблица переменных и нюансов находится в [документации по Yandex Cloud](docs/yandex-cloud.md#продакшен-env).
-
-## Деплой в Yandex Cloud
-
-Короткий путь:
-
-```powershell
-.\scripts\deploy-yc.ps1 -FunctionName max-bot -ServiceAccountId "<service_account_id>"
-```
-
-```bash
-bash scripts/deploy-yc.sh max-bot "$SA_ID"
-```
-
-Deploy-скрипт сам собирает пакет и перед загрузкой новой версии применяет YDB-схему.
-
-После деплоя проверьте:
-
-```bash
-curl https://functions.yandexcloud.net/<function_id>
-```
-
-Ожидаемый ответ:
-
-```json
-{"status":"ok"}
-```
-
-Полный порядок создания YDB, service account, Cloud Function, публичного доступа, timer trigger и обновления продакшена описан в [документации по Yandex Cloud](docs/yandex-cloud.md).
-
-## Миграция старой базы в YDB
-
-Старый источник задаётся через `SOURCE_DATABASE_URL`, новая база — через `YDB_ENDPOINT` и `YDB_DATABASE`.
-
-```bash
-export SOURCE_DATABASE_URL='postgresql+psycopg://user:password@host:5432/maxbot'
-export STORAGE_BACKEND=ydb
-export YDB_ENDPOINT='grpcs://ydb.serverless.yandexcloud.net:2135'
-export YDB_DATABASE='/ru-central1/<cloud_id>/<database_id>'
-export YDB_ACCESS_TOKEN_CREDENTIALS="$(yc iam create-token)"
-python -m app.ydb_schema
-python -m app.migration
-```
-
-Подробности переноса и проверки данных описаны в [документации по YDB](docs/ydb.md#миграция-из-postgresql-или-sqlite).
+Подробно все переменные разобраны в [документации по запуску](docs/development.md#env-настройки).
 
 ## Тесты
 
@@ -211,20 +130,18 @@ python -m pytest -q
 docker compose run --rm bot python -m pytest -q
 ```
 
-Проверка пакета Cloud Functions:
+## Деплой
+
+Короткая команда для Yandex Cloud Functions:
 
 ```powershell
-.\scripts\build-yc-package.ps1
+.\scripts\deploy-yc.ps1 -FunctionName max-bot -ServiceAccountId "<service_account_id>"
 ```
 
 ```bash
-bash scripts/build-yc-package.sh
+bash scripts/deploy-yc.sh max-bot "$SA_ID"
 ```
 
-## Что важно помнить
+Скрипт собирает пакет, применяет YDB-схему и создает новую версию Cloud Function. Полный порядок настройки облака описан в [docs/yandex-cloud.md](docs/yandex-cloud.md).
 
-MAX не сможет вызвать локальный `localhost`; для настоящего webhook нужен публичный HTTPS URL. В продакшене сейчас используется прямой URL Cloud Functions без API Gateway.
-
-Ссылки на конкретные мероприятия строятся как `https://max.ru/<botName>?start=e_<event-slug>`. В карточке бот показывает строку `Ссылка: Нажмите чтобы скопировать` и кнопку `Поделиться`, которая копирует ссылку в буфер обмена. Для старых мероприятий без slug бот создаёт slug при первом показе карточки. `MAX_BOT_USERNAME` лучше заполнить явно, но если он пустой, бот попробует получить ник через MAX API `/me`. В подписке MAX оставьте update-тип `bot_started`.
-
-Serverless не означает “бесконечно бесплатно”. Для демо и пилота выбран вариант без VM, Container Registry и API Gateway, но расходы всё равно возможны при превышении лимитов Yandex Cloud. Включите бюджетные уведомления в Billing.
+Если вы не хотите Yandex serverless, проект можно запустить на своем сервере как обычный FastAPI-сервис через Docker Compose или `uvicorn`. Этот вариант описан в [docs/development.md](docs/development.md#вариант-2-свой-сервер).

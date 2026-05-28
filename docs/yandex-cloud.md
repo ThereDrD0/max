@@ -1,92 +1,65 @@
-# Серверная часть в Yandex Cloud
+# Деплой в Yandex Cloud serverless
 
-Продакшен-вариант проекта развёрнут без собственного сервера: входящие webhook-запросы принимает Yandex Cloud Functions, данные лежат в YDB Serverless, а автоматические уведомления запускаются timer trigger. Docker остаётся для локальной разработки.
-
-## Какие сервисы используются
-
-Используются:
-
-- Yandex Cloud Functions — публичный HTTPS endpoint для MAX webhook и обработчик timer-событий.
-- YDB Serverless — основная база данных.
-- Service account — техническая учётная запись, от имени которой функция ходит в YDB.
-- Timer trigger — периодический запуск функции для отправки уведомлений из `notification_outbox`.
-
-Сознательно не используются:
-
-- API Gateway: прямого URL Cloud Functions достаточно, а API Gateway добавляет ещё один сервис и потенциальную тарификацию.
-- Container Registry: функция деплоится исходниками/пакетом Python, без контейнерного образа.
-- VM/VPS: нет постоянно работающего сервера, который надо покупать, обновлять и администрировать.
-
-## Текущий стенд
-
-Нечувствительные параметры текущего стенда:
+Этот документ описывает продакшен-размещение проекта в Yandex Cloud без собственного сервера. Основная схема:
 
 ```text
-Cloud Function name: max-bot
-Cloud Function public URL: https://functions.yandexcloud.net/d4en27dqbb87rvb7lmms
-YDB name: ydb563
-YDB endpoint: grpcs://ydb.serverless.yandexcloud.net:2135
-YDB database: /ru-central1/b1girouj93o3e1m15oh4/etnjer5cu9onu833cnlt
-Service account name: max-bot-sa
-Timer trigger name: max-bot-notifications
+MAX webhook
+  -> Yandex Cloud Functions
+  -> приложение Python
+  -> YDB Serverless
+
+Timer trigger
+  -> та же Cloud Function
+  -> NotificationWorker
+  -> MAX API
 ```
 
-Не вставляйте в документацию:
+Cloud Functions принимает webhook и timer-события. YDB Serverless хранит данные. Service account дает функции право работать с YDB.
 
+## Что используется
+
+Нужные сервисы:
+
+- Cloud Functions — публичный HTTPS endpoint для webhook MAX;
+- YDB Serverless — база данных;
+- Service account — техническая учетная запись функции;
+- Timer trigger — периодический запуск отправки уведомлений;
+- Cloud Logging — логи функции.
+
+Сознательно не обязательны:
+
+- API Gateway — прямого URL Cloud Functions достаточно;
+- Container Registry — функция деплоится исходниками Python;
+- VM/VPS — нет постоянно работающего сервера.
+
+## Что нужно заранее
+
+На локальной машине:
+
+- настроенный `yc`;
+- доступ к нужному cloud и folder;
+- `.env` с продакшен-переменными;
 - `MAX_BOT_TOKEN`;
 - `WEBHOOK_SECRET`;
-- OAuth/IAM-токены;
-- файл ключа сервисного аккаунта, если когда-нибудь будете его использовать.
+- id service account.
 
-## Сайт для управления
-
-Авторизоваться нужно в Yandex Cloud Console:
-
-```text
-https://console.yandex.cloud/
-```
-
-Основные разделы:
-
-- Cloud Functions — функция `max-bot`, версии, переменные окружения, логи.
-- Managed Service for YDB — база `ydb563`, endpoint, путь базы, таблицы, запросы.
-- Service accounts — сервисный аккаунт `max-bot-sa`.
-- Cloud Functions -> Triggers — timer trigger `max-bot-notifications`.
-- Billing — бюджетные уведомления и контроль расходов.
-
-## Установка и настройка `yc`
-
-`yc` — это командная строка Yandex Cloud. На этой машине она может лежать здесь:
-
-```text
-C:\Users\drdth\yandex-cloud\bin\yc.exe
-```
-
-Скрипт `scripts/deploy-yc.ps1` сначала ищет `yc` в `PATH`, а если не находит, использует этот fallback-путь.
-
-Проверка:
-
-```powershell
-& "$env:USERPROFILE\yandex-cloud\bin\yc.exe" config list
-```
-
-или, если `yc` есть в `PATH`:
+Проверить `yc`:
 
 ```bash
 yc config list
 ```
 
-При первичной настройке:
+На Windows, если `yc` не в `PATH`, он может лежать здесь:
 
-```bash
-yc init
+```powershell
+& "$env:USERPROFILE\yandex-cloud\bin\yc.exe" config list
 ```
 
-Команда спросит cloud, folder и зону Compute. Для этого проекта Compute zone почти не важна, потому что виртуальные машины не используются. Можно выбрать ближайшую стандартную зону или пропустить, если CLI позволяет.
+Скрипт `scripts/deploy-yc.ps1` сначала ищет `yc` в `PATH`, потом пробует этот путь.
 
-## Создание инфраструктуры через `yc`
+## Создание YDB Serverless
 
-Создать YDB Serverless:
+Создать базу:
 
 ```bash
 yc ydb database create max-bot-ydb \
@@ -101,6 +74,18 @@ yc ydb database create max-bot-ydb \
 ```bash
 yc ydb database get max-bot-ydb
 ```
+
+Для приложения нужны:
+
+```env
+YDB_ENDPOINT=grpcs://ydb.serverless.yandexcloud.net:2135
+YDB_DATABASE=/ru-central1/<cloud_id>/<database_id>
+YDB_METADATA_CREDENTIALS=1
+```
+
+`grpcs` — это gRPC поверх TLS. Для local-ydb используется `grpc`.
+
+## Service account и доступ к YDB
 
 Создать service account:
 
@@ -123,7 +108,11 @@ yc ydb database add-access-binding max-bot-ydb \
   --service-account-id "$SA_ID"
 ```
 
-Создать Cloud Function:
+Для текущего проекта `ydb.editor` на конкретную базу проще и понятнее, чем широкая роль на весь folder. Если проект уйдет в строгий продакшен, права можно ужать отдельным анализом операций.
+
+## Создание Cloud Function
+
+Создать функцию:
 
 ```bash
 yc serverless function create --name max-bot
@@ -135,18 +124,21 @@ yc serverless function create --name max-bot
 yc serverless function allow-unauthenticated-invoke max-bot
 ```
 
-Почему публичной? MAX должен вызвать webhook без Yandex IAM-подписи. Защита от чужих запросов делается через `WEBHOOK_SECRET`.
+Почему публичной: MAX должен вызвать webhook без Yandex IAM-подписи. Защита от чужих запросов делается через `WEBHOOK_SECRET`, который MAX передает в заголовке `X-Max-Bot-Api-Secret`.
 
-Создать timer trigger:
+Получить URL функции:
 
 ```bash
-yc serverless trigger create timer max-bot-notifications \
-  --cron-expression "*/5 * * * ? *" \
-  --invoke-function-name max-bot \
-  --invoke-function-service-account-id "$SA_ID"
+yc serverless function get max-bot
 ```
 
-`*/5 * * * ? *` означает запуск каждые 5 минут. Timer вызывает ту же функцию, но не как HTTP webhook: handler видит специальное timer-событие и запускает `NotificationWorker`.
+URL будет вида:
+
+```text
+https://functions.yandexcloud.net/<function_id>
+```
+
+Его надо указать в `WEBHOOK_URL` и в подписке MAX.
 
 ## Продакшен `.env`
 
@@ -165,32 +157,20 @@ YDB_DATABASE=/ru-central1/<cloud_id>/<database_id>
 YDB_METADATA_CREDENTIALS=1
 SOURCE_DATABASE_URL=
 ADMIN_USER_IDS=<MAX user id администратора>
-ORGANIZER_USER_IDS=<MAX user id организаторов через запятую>
+ORGANIZER_USER_IDS=<MAX user id Организаторов через запятую>
 MAX_API_RPS=30
+REMINDER_SYNC_INTERVAL_MINUTES=60
+REMINDER_SYNC_WINDOW_MINUTES=5
+PERFORMANCE_METRICS_ENABLED=true
+PERFORMANCE_METRICS_SLOW_MS=1000
 DOCUMENTS_VERSION=hackathon-2026-05
 ```
 
-Подробно:
+Секреты нельзя коммитить. `.env` нужен локальному deploy-скрипту, чтобы передать разрешенные переменные в новую версию Cloud Function.
 
-| Переменная | Продакшен-значение | Где брать | Нюансы |
-| --- | --- | --- | --- |
-| `APP_ENV` | `prod` | Задаём вручную. | В `prod` бот скрывает dev-информацию вроде raw id мероприятий. |
-| `MAX_BOT_TOKEN` | секрет | В настройках бота MAX. | Нужен для исходящих запросов. Не коммитить. |
-| `MAX_BOT_USERNAME` | ник без `@` | Публичная ссылка бота `https://max.ru/<botName>`. | Лучше задать явно для ссылок в карточках. Если пусто, бот попробует получить ник через MAX API `/me`; входящие диплинки работают и без него. |
-| `WEBHOOK_URL` | `https://functions.yandexcloud.net/<function_id>` | `yc serverless function get max-bot`. | Удобно хранить для регистрации подписки MAX. Код функции не строит логику на этой переменной. |
-| `WEBHOOK_SECRET` | секрет | Генерируем сами. | Должен совпадать с secret в подписке MAX. |
-| `WEBHOOK_PATH` | `/webhook` | Значение по умолчанию. | В Cloud Functions прямой URL попадает в `index.handler`; путь критичен для локального FastAPI. |
-| `STORAGE_BACKEND` | `ydb` | Задаём вручную. | `memory` только для тестов. |
-| `YDB_ENDPOINT` | `grpcs://ydb.serverless.yandexcloud.net:2135` | Страница YDB в консоли. | В облаке нужен `grpcs`, не `grpc`. |
-| `YDB_DATABASE` | `/ru-central1/.../...` | Страница YDB в консоли. | Это полный путь базы, не короткое имя `ydb563`. |
-| `YDB_METADATA_CREDENTIALS` | `1` | Задаём вручную. | Функция получает IAM-токен service account через metadata service. |
-| `SOURCE_DATABASE_URL` | пусто | Нужно только для миграции. | Не передавайте старую БД в обычный продакшен-запуск. |
-| `ADMIN_USER_IDS` | id через запятую | MAX user id администраторов. | Админ видит все мероприятия. |
-| `ORGANIZER_USER_IDS` | id через запятую | MAX user id организаторов. | При seed-загрузке получают доступ к мероприятиям. |
-| `MAX_API_RPS` | `30` | Выбирается вручную. | Ограничение отправки уведомлений в MAX API. |
-| `DOCUMENTS_VERSION` | например `hackathon-2026-05` | Версия текста согласия. | При изменении юридического текста увеличивайте версию. |
+`scripts/deploy-yc.ps1` и `scripts/deploy-yc.sh` передают только фиксированный список переменных. Если добавите новую настройку приложения, проверьте deploy-скрипты.
 
-## Сборка пакета функции
+## Сборка пакета
 
 Windows:
 
@@ -204,7 +184,7 @@ Linux:
 bash scripts/build-yc-package.sh
 ```
 
-Скрипт создаёт:
+Скрипт создает:
 
 ```text
 dist/yc-package
@@ -224,9 +204,9 @@ dist/max-bot-yc.zip
 app/migration
 ```
 
-Это сделано, чтобы runtime функции не тянул PostgreSQL/SQLAlchemy-зависимости, которые нужны только для миграции.
+Миграция тянет PostgreSQL/SQLAlchemy-зависимости, а runtime функции они не нужны.
 
-## Деплой функции
+## Деплой новой версии
 
 Windows:
 
@@ -245,10 +225,11 @@ bash scripts/deploy-yc.sh max-bot "$SA_ID"
 Скрипт:
 
 1. собирает пакет;
-2. читает `.env`;
-3. применяет YDB-схему через `python -m app.ydb_schema`;
-4. передаёт разрешённые переменные окружения в Cloud Functions;
-5. создаёт новую версию функции.
+2. читает `.env` и переменные окружения;
+3. проверяет, что есть `MAX_BOT_TOKEN` и `WEBHOOK_SECRET`;
+4. при `STORAGE_BACKEND=ydb` получает IAM-токен через `yc iam create-token`;
+5. запускает `python -m app.ydb_schema`;
+6. создает новую версию Cloud Function.
 
 Параметры версии:
 
@@ -260,65 +241,23 @@ timeout: 30s
 source-path: dist/yc-package
 ```
 
-Нюанс: создание новой версии не меняет URL функции. MAX webhook продолжает ходить на тот же `https://functions.yandexcloud.net/<function_id>`.
+Создание новой версии не меняет URL функции. MAX продолжает ходить на тот же `https://functions.yandexcloud.net/<function_id>`.
 
-## Что лежит в `index.py`
+## Проверка версии и тега latest
 
-Корневой файл `index.py` экспортирует:
-
-```python
-handler = create_function_handler()
-```
-
-Yandex Cloud Functions вызывает `index.handler`. Внутри handler:
-
-- `GET` возвращает health JSON;
-- `POST` проверяет webhook secret и обрабатывает MAX update;
-- timer event запускает worker уведомлений.
-
-В `app/function_handler.py` есть постоянный `_AsyncRunner`. Он нужен, чтобы не закрывать event loop после каждого вызова: библиотека `maxapi` хранит асинхронную HTTP-сессию, и при закрытом loop исходящие запросы начинают падать.
-
-## Обновление продакшена
-
-Стандартный порядок:
-
-1. Внести изменения локально.
-2. Прогнать тесты:
+После деплоя проверьте список версий:
 
 ```bash
-python -m pytest -q
+yc serverless function version list --function-name max-bot
 ```
 
-3. Если менялась YDB-схема, обновить её:
-
-```powershell
-$yc = Join-Path $env:USERPROFILE "yandex-cloud\bin\yc.exe"
-$env:YDB_ACCESS_TOKEN_CREDENTIALS = & $yc iam create-token
-python -m app.ydb_schema
-Remove-Item Env:\YDB_ACCESS_TOKEN_CREDENTIALS
-```
-
-или:
+Новая версия должна иметь тег `$latest`. Подробно посмотреть версию:
 
 ```bash
-export YDB_ACCESS_TOKEN_CREDENTIALS="$(yc iam create-token)"
-python -m app.ydb_schema
-unset YDB_ACCESS_TOKEN_CREDENTIALS
+yc serverless function version get <version_id>
 ```
 
-4. Загрузить новую версию:
-
-```powershell
-.\scripts\deploy-yc.ps1 -FunctionName max-bot -ServiceAccountId "<service_account_id>"
-```
-
-или:
-
-```bash
-bash scripts/deploy-yc.sh max-bot "$SA_ID"
-```
-
-5. Проверить health:
+Health:
 
 ```bash
 curl https://functions.yandexcloud.net/<function_id>
@@ -330,23 +269,118 @@ curl https://functions.yandexcloud.net/<function_id>
 {"status":"ok"}
 ```
 
-6. Проверить логи:
+Логи:
 
 ```bash
 yc serverless function logs max-bot --since 10m --limit 100
 ```
 
-7. Проверить сценарий в MAX: `/start`, кнопка информации, запись, мои записи.
+## Timer trigger для уведомлений
+
+Уведомления отправляет timer trigger. Он вызывает ту же функцию, но событие приходит не как HTTP-запрос, а в формате timer-сообщения.
+
+Создать trigger:
+
+```bash
+yc serverless trigger create timer max-bot-notifications \
+  --cron-expression "*/5 * * * ? *" \
+  --invoke-function-name max-bot \
+  --invoke-function-service-account-id "$SA_ID"
+```
+
+Выражение `*/5 * * * ? *` означает запуск каждые 5 минут. В документации Yandex Cloud cron-поля идут так: минуты, часы, день месяца, месяц, день недели, год. Расписание timer работает в UTC+0.
+
+Официальная документация:
+
+- [Timer that invokes a Cloud Functions function](https://yandex.cloud/en/docs/functions/concepts/trigger/timer)
+- [Creating a timer that invokes Cloud Functions](https://yandex.cloud/en/docs/functions/operations/trigger/timer-create)
+
+Важно: service account trigger должен иметь право вызвать функцию. Документация Yandex Cloud указывает роль `functions.functionInvoker` для service account, который запускает функцию через timer.
+
+## Что делает `index.handler`
+
+Корневой `index.py`:
+
+```python
+handler = create_function_handler()
+```
+
+Yandex Cloud Functions вызывает `index.handler`.
+
+Внутри `app/function_handler.py`:
+
+- обычный `GET` возвращает `{"status":"ok"}`;
+- `POST` проверяет secret, разбирает webhook MAX и вызывает dispatcher;
+- timer event запускает `NotificationWorker.process_due`;
+- `_CleanupScheduler` периодически чистит старые мероприятия;
+- `_AsyncRunner` держит постоянный event loop для асинхронного MAX-клиента.
+
+## Регистрация webhook в MAX
+
+После создания функции зарегистрируйте webhook в MAX:
+
+```bash
+curl -X POST "https://platform-api.max.ru/subscriptions" \
+  -H "Authorization: <MAX_BOT_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://functions.yandexcloud.net/<function_id>",
+    "update_types": ["bot_started", "message_created", "message_callback"],
+    "secret": "<WEBHOOK_SECRET>"
+  }'
+```
+
+Официальная документация MAX по `POST /subscriptions`: [dev.max.ru/docs-api/methods/POST/subscriptions](https://dev.max.ru/docs-api/methods/POST/subscriptions).
+
+Проверьте текущие подписки:
+
+```bash
+curl -X GET "https://platform-api.max.ru/subscriptions" \
+  -H "Authorization: <MAX_BOT_TOKEN>"
+```
+
+## Обновление продакшена
+
+Стандартный порядок:
+
+1. Внести изменения.
+2. Прогнать тесты:
+
+```bash
+python -m pytest -q
+```
+
+3. Если менялись файлы приложения, собрать пакет:
+
+```powershell
+.\scripts\build-yc-package.ps1
+```
+
+4. Точечно проверить, что изменение попало в пакет:
+
+```powershell
+rg "нужная_строка_или_имя" dist/yc-package
+```
+
+5. Задеплоить:
+
+```powershell
+.\scripts\deploy-yc.ps1 -FunctionName max-bot -ServiceAccountId "<service_account_id>"
+```
+
+6. Проверить `$latest`, health, логи и один живой сценарий в MAX.
+
+Если менялась схема YDB, отдельно убедитесь, что `python -m app.ydb_schema` выполнен на нужной базе. Deploy-скрипт делает это автоматически для `STORAGE_BACKEND=ydb`, но при ручных операциях лучше проверить явно.
 
 ## Логи и диагностика
 
-Команда:
+Последние логи:
 
 ```bash
 yc serverless function logs max-bot --since 30m --limit 100
 ```
 
-PowerShell с явным путём:
+PowerShell с явным путем:
 
 ```powershell
 & "$env:USERPROFILE\yandex-cloud\bin\yc.exe" `
@@ -358,129 +392,53 @@ PowerShell с явным путём:
 На что смотреть:
 
 - `START`, `END`, `REPORT` — функция вызвалась и завершилась;
-- `Duration` — сколько длился вызов;
-- `Function Init Duration` — холодный старт;
-- `ERROR` или stack trace — ошибка приложения;
-- `Memory Used` — если близко к лимиту, увеличить memory.
+- `Duration` — длительность вызова на стороне Cloud Functions;
+- `Function Init Duration` — cold start;
+- строки с `"event":"perf_metric"` — внутренняя метрика приложения;
+- stack trace — авария в коде;
+- memory used — если близко к лимиту, увеличьте memory.
 
-Если команда логов зависает или долго держит процесс в PowerShell, можно остановить оставшийся `yc`:
-
-```powershell
-Get-Process yc -ErrorAction SilentlyContinue | Stop-Process -Force
-```
-
-## Проверка webhook вручную
-
-Для проверки продакшен webhook без клиента MAX можно отправить тестовый POST. Не вставляйте настоящий secret в историю команд, если терминал логируется.
-
-PowerShell:
-
-```powershell
-$headers = @{
-  "Content-Type" = "application/json"
-  "X-Max-Bot-Api-Secret" = "<WEBHOOK_SECRET>"
-}
-
-$body = @{
-  update_type = "message_created"
-  message = @{
-    sender = @{ user_id = 123456789; name = "Тестовый пользователь" }
-    recipient = @{}
-    body = @{ text = "/start"; mid = "manual-check" }
-  }
-} | ConvertTo-Json -Depth 10 -Compress
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "https://functions.yandexcloud.net/<function_id>" `
-  -Headers $headers `
-  -Body $body
-```
-
-Если ответ:
-
-```json
-{"ok":true}
-```
-
-webhook обработал событие. Если при этом бот ничего не прислал в MAX, смотрите логи функции и корректность `MAX_BOT_TOKEN`.
-
-## Timer trigger и уведомления
-
-Напоминания и ручные уведомления не отправляются прямо в момент создания записи массовым циклом. Они попадают в:
-
-```text
-notification_outbox
-```
-
-Timer trigger вызывает функцию каждые 5 минут. Handler распознаёт timer event по типу:
-
-```text
-yandex.cloud.events.serverless.triggers.TimerMessage
-```
-
-и запускает `NotificationWorker`. Worker:
-
-1. выбирает pending-уведомления, у которых `send_after <= now`;
-2. проверяет, что уведомления по записи не отключены;
-3. отправляет сообщение через MAX API;
-4. помечает уведомление `sent`, `failed` или `skipped`;
-5. соблюдает `MAX_API_RPS`.
-
-Если уведомления не уходят:
-
-- проверьте, существует ли trigger;
-- проверьте, что trigger вызывает именно `max-bot`;
-- проверьте service account trigger;
-- посмотрите `notification_outbox`;
-- посмотрите логи функции за время запуска trigger.
-
-## Бесплатный режим
-
-Чтобы держаться в нуле или около нуля:
-
-- не используйте API Gateway без необходимости;
-- не используйте Container Registry;
-- не держите VM/VPS;
-- YDB Serverless создавайте с `sls-provisioned-rcu 0`;
-- ограничьте storage;
-- включите бюджетные уведомления в Billing;
-- следите за количеством вызовов функции;
-- не запускайте слишком частый timer без причины;
-- не храните большие бинарные данные в YDB.
-
-Важно: тарифы и бесплатные лимиты могут меняться. Перед долгим публичным запуском проверьте актуальные условия в Yandex Cloud Billing.
+Подробнее про метрики и cold start: [performance-audit.md](performance-audit.md).
 
 ## Частые ошибки
 
 `yc` не найден.
 
-Добавьте `yc` в `PATH` или используйте полный путь:
+Добавьте `yc` в `PATH` или используйте полный путь. PowerShell-скрипт уже пробует fallback `C:\Users\<user>\yandex-cloud\bin\yc.exe`.
 
-```powershell
-& "$env:USERPROFILE\yandex-cloud\bin\yc.exe" config list
-```
+Функция не видит новые переменные.
 
-Функция не видит переменные окружения.
-
-Переменные передаются при создании версии. Если вы поменяли `.env`, надо создать новую версию функции через deploy-скрипт.
+Переменные окружения привязаны к версии функции. Если поменяли `.env`, нужно создать новую версию через deploy-скрипт.
 
 Функция не имеет доступа к YDB.
 
-Проверьте service account версии функции и access binding на YDB. Роль должна быть выдана именно тому service account, который указан в версии функции.
+Проверьте service account версии функции и access binding на YDB. Роль должна быть выдана именно тому service account, который указан в версии.
 
-Health работает, а webhook падает.
+Webhook возвращает `403`.
 
-`GET` почти не использует внешние сервисы. `POST` ходит в YDB и MAX API. Смотрите logs и проверяйте `WEBHOOK_SECRET`, YDB credentials и `MAX_BOT_TOKEN`.
+Не совпадает `WEBHOOK_SECRET` в Cloud Function и подписке MAX.
 
-После деплоя MAX всё ещё ведёт себя по-старому.
+Health работает, а POST webhook падает.
 
-Проверьте, что новая версия функции действительно создана, а webhook URL указывает на эту функцию. URL функции не меняется, но если у вас несколько функций, MAX может быть подписан не на ту.
+`GET` почти не ходит во внешние сервисы. `POST` обращается к YDB и MAX API. Смотрите логи, `MAX_BOT_TOKEN`, YDB credentials и traceback.
 
-Холодный старт занимает несколько секунд.
+После деплоя MAX ведет себя по-старому.
 
-Это нормально для Cloud Functions: первый запрос после простоя инициализирует Python, зависимости, YDB driver и MAX client. Последующие тёплые вызовы быстрее.
+Проверьте, что новая версия получила `$latest`, а подписка MAX указывает на нужную функцию.
 
-Ошибка `Event loop is closed`.
+Cold start занимает несколько секунд.
 
-Проверьте, что в функции используется текущий `app/function_handler.py` с `_AsyncRunner`, и что `MaxApiBotClient` не переиспользуется между разными закрытыми event loop.
+Это нормальная особенность serverless: после простоя Cloud Functions заново поднимает runtime, импортирует зависимости, создает YDB driver и MAX client. Смотрите `Function Init Duration` в `REPORT`.
+
+## Стоимость
+
+Serverless не значит “бесконечно бесплатно”. Расходы зависят от вызовов функции, длительности, памяти, чтений и записей YDB, хранения и логов.
+
+Минимальные меры:
+
+- держать `sls-provisioned-rcu` равным `0`, если не нужен гарантированный прогрев YDB;
+- не хранить бинарные файлы в YDB;
+- не делать слишком частый timer без причины;
+- включить бюджетные уведомления в Billing;
+- следить за графиками Cloud Functions и YDB;
+- держать метрики производительности включенными хотя бы на период пилота.
