@@ -754,7 +754,7 @@ class YdbStorage:
         if isinstance(result_id, Registration):
             return self._attach_registration(result_id)
         registration = self.get_registration(result_id)
-        if registration is None:  # pragma: no cover - defensive edge
+        if registration is None:  # pragma: no cover - защитная ветка
             raise RegistrationNotFoundError("Запись не найдена")
         return registration
 

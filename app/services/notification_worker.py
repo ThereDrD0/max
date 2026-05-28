@@ -70,7 +70,7 @@ class NotificationWorker:
                     text=item.message_text,
                     attachments=await self._notification_attachments(item),
                 )
-            except Exception as exc:  # pragma: no cover - defensive edge
+            except Exception as exc:  # pragma: no cover - защитная ветка
                 self.storage.set_notification_result(
                     item.id,
                     status=OutboxStatus.FAILED,

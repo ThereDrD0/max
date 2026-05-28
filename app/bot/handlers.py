@@ -2337,7 +2337,7 @@ class BotHandlers:
                     text=item.message_text,
                     attachments=await worker._notification_attachments(item),
                 )
-            except Exception as exc:  # pragma: no cover - defensive edge
+            except Exception as exc:  # pragma: no cover - защитная ветка
                 self.storage.set_notification_result(
                     item.id,
                     status=OutboxStatus.FAILED,
@@ -3454,7 +3454,7 @@ class BotHandlers:
     def _run_best_effort(action: str, callback: Callable[[], None]) -> None:
         try:
             callback()
-        except Exception:  # pragma: no cover - defensive logging
+        except Exception:  # pragma: no cover - защитное логирование
             logger.warning("Best-effort action failed: %s", action, exc_info=True)
 
     @staticmethod
